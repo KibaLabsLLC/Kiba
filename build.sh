@@ -6095,15 +6095,59 @@ else
 fi
 
 progress 10 "Starting Docker..."
-pkexec systemctl enable --now docker >/dev/null 2>&1
+mkdir -p "${CONF_DIR}"
+
+# Everything below that actually needs root -- starting docker, reading
+# and clearing the root-only password stash under /etc/kibaos, checking
+# for the "nvidia" docker runtime, and running `docker compose up`
+# against the daemon's root-owned socket -- used to be seven separate
+# pkexec calls scattered through this function. Each one is its own
+# polkit authentication unless the local agent happens to cache
+# auth_admin sessions, which isn't something this script can rely on --
+# in practice that meant up to seven password prompts for a single "set
+# up Windows Workspace" run. Folded into one script and run through
+# exactly one pkexec instead: everything that needs root runs together,
+# once; everything that doesn't (compose.yaml templating logic aside --
+# see below -- the RDP wait-poll, setup.sh) stays out here, unprivileged,
+# same as before.
+#
+# The compose.yaml templating itself (copying from WINAPPS_SRC, the arm
+# image swap, substituting the Windows account password in) doesn't
+# strictly need root -- but the password half of it does (the stash
+# under /etc/kibaos is 0600 root:root), so rather than split templating
+# across the privilege boundary too, the whole thing moved into the
+# privileged script and gets chowned back to the real user at the end.
+#
+# pkexec resets the environment, so nothing in the privileged script can
+# rely on $HOME, $USER, or any other variable from out here -- every
+# path and identity it needs (CONF_DIR/COMPOSE_FILE, whether NVIDIA
+# hardware is even present, which real user to hand the results back to)
+# is passed in as a positional argument, already resolved out here
+# first. lspci doesn't need root, so the actual hardware check
+# (NVIDIA_HW) happens out here rather than adding a reason to elevate.
+NVIDIA_HW=0
+lspci -nnk 2>/dev/null | grep -qi 'nvidia' && NVIDIA_HW=1
+ORIG_USER="$(id -un)"
+GPU_FLAG_FILE="$(mktemp)"
+PRIV_SCRIPT="$(mktemp)"
+
+cat > "${PRIV_SCRIPT}" << 'PRIVILEGED'
+#!/usr/bin/env bash
+set -u
+CONF_DIR="$1"; COMPOSE_FILE="$2"; NVIDIA_HW="$3"; ORIG_USER="$4"; GPU_FLAG_FILE="$5"
+WINAPPS_SRC="/opt/kibaos/winapps-src"
+
+echo "PROGRESS 10 Starting Docker..."
+systemctl enable --now docker >/dev/null 2>&1
 if ! systemctl is-active --quiet docker; then
   logger -t kibaos-winapps-setup "docker failed to start; see systemctl status docker"
-  fail "Docker couldn't be started -- check 'systemctl status docker'."
+  echo "PROGRESS 100 Setup failed: Docker couldn't be started -- check 'systemctl status docker'."
+  echo "FATAL: Docker couldn't be started -- check 'systemctl status docker'." >&2
+  exit 1
 fi
 
-mkdir -p "${CONF_DIR}"
 if [ ! -f "${COMPOSE_FILE}" ]; then
-  progress 15 "Preparing Windows Workspace configuration..."
+  echo "PROGRESS 15 Preparing Windows Workspace configuration..."
   cp "${WINAPPS_SRC}/compose.yaml" "${COMPOSE_FILE}"
   # compose.yaml references "./oem" as a relative bind-mount source (for
   # post-install RDPApps.reg / install.bat execution inside the guest).
@@ -6128,21 +6172,22 @@ if [ ! -f "${COMPOSE_FILE}" ]; then
   # MyWindowsPassword), that's a weak, publicly documented password --
   # and per WinApps' own docs, an empty/default password can make Windows
   # auto-login in a way that breaks the RDP handshake WinApps needs.
-  progress 20 "Setting your Windows account password..."
+  echo "PROGRESS 20 Setting your Windows account password..."
   WIN_USER="KibaUser"
   WIN_PASS=""
   # Rather than a random string the person is never shown, reuse the same
   # password they already log into KibaOS with -- one password to
   # remember, not two. kiba_install_create_user() (disk installs) and
   # kibaos-oem-finish.sh (OEM-imaged devices) both stash it root-only and
-  # one-time-use, right after account creation, for exactly this. Read it
-  # via pkexec (it's 0600 root:root) and delete the stash the moment it's
-  # read, so it never sits around longer than this single read needs it
-  # to.
+  # one-time-use, right after account creation, for exactly this. Already
+  # running as root in here, so just read it directly (no separate
+  # pkexec needed the way the old per-call version needed one) and
+  # delete the stash the moment it's read, so it never sits around
+  # longer than this single read needs it to.
   STASH="/etc/kibaos/winapps-userpass"
-  if pkexec test -f "${STASH}" 2>/dev/null; then
-    WIN_PASS="$(pkexec cat "${STASH}" 2>/dev/null)"
-    pkexec rm -f "${STASH}" 2>/dev/null || true
+  if [ -f "${STASH}" ]; then
+    WIN_PASS="$(cat "${STASH}" 2>/dev/null)"
+    rm -f "${STASH}" 2>/dev/null || true
   fi
   # Headless: there's no dialog left to ask for a password interactively
   # if the stash is missing or too short (e.g. this runs long after
@@ -6155,7 +6200,7 @@ if [ ! -f "${COMPOSE_FILE}" ]; then
   if [ -z "${WIN_PASS}" ] || [ "${#WIN_PASS}" -lt 8 ]; then
     WIN_PASS="$(tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 20)"
     NOTE="/etc/kibaos/winapps-password-note"
-    pkexec bash -c "umask 077; printf '%s\n' '${WIN_PASS}' > '${NOTE}'" 2>/dev/null || true
+    ( umask 077; printf '%s\n' "${WIN_PASS}" > "${NOTE}" ) 2>/dev/null || true
     logger -t kibaos-winapps-setup "no reusable KibaOS password found -- generated a new Windows password, stashed root-only at ${NOTE}"
   fi
   # Rewritten line-by-line rather than with sed/awk substitution -- the
@@ -6194,31 +6239,21 @@ fi
 # a form that works headless like this.
 #
 # Two separate checks, both required:
-#   1. lspci -- is there NVIDIA hardware at all.
+#   1. NVIDIA_HW (passed in) -- is there NVIDIA hardware at all, per the
+#      unprivileged lspci check out in the caller.
 #   2. docker info -- is the "nvidia" container runtime actually
 #      registered, meaning the NVIDIA Container Toolkit is installed and
-#      the proprietary driver is loaded on the host.
+#      the proprietary driver is loaded on the host. Already running as
+#      root in here, talking straight to the docker socket -- no pkexec
+#      needed for this one either now.
 # Hardware alone isn't enough: plenty of machines have an NVIDIA card
 # sitting there on nouveau with no proprietary driver installed, and
 # requesting a device reservation docker can't satisfy makes the whole
 # "docker compose up" fail outright rather than just skip GPU passthrough.
-#
-# `docker info` (and `docker compose` below) talk to the Docker daemon's
-# socket, which is root-owned. The `newgrp docker` re-exec earlier only
-# fixes up *this shell's* group token, and that's not enough on its own
-# if group membership isn't actually granting socket access -- plenty of
-# reports of a rootful Docker/Podman only being visible to root, group
-# membership or not. Elevate these two calls with pkexec rather than
-# assume the group path works. pkexec resets the environment, so $HOME
-# (and therefore any path derived from it, like CONF_DIR/COMPOSE_FILE)
-# must NOT be re-derived inside the elevated command -- it has to be the
-# already-resolved absolute path from this unprivileged part of the
-# script, passed straight through as an argument.
-progress 30 "Checking for GPU passthrough..."
+echo "PROGRESS 30 Checking for GPU passthrough..."
 COMPOSE_ARGS=(--file "${COMPOSE_FILE}")
 GPU_DETECTED=0
-if lspci -nnk 2>/dev/null | grep -qi 'nvidia' \
-   && pkexec docker info 2>/dev/null | grep -qi 'nvidia'; then
+if [ "${NVIDIA_HW}" -eq 1 ] && docker info 2>/dev/null | grep -qi 'nvidia'; then
   OVERRIDE_FILE="${CONF_DIR}/compose.override.yaml"
   cat > "${OVERRIDE_FILE}" << 'GPUOVERRIDE'
 services:
@@ -6234,19 +6269,60 @@ GPUOVERRIDE
   COMPOSE_ARGS+=(--file "${OVERRIDE_FILE}")
   GPU_DETECTED=1
 fi
+# GPU_FLAG_FILE is how this one bit survives back out to the unprivileged
+# caller -- it's needed much later (the final "All set!" message, after
+# the RDP wait-poll and setup.sh both run unprivileged) and a variable
+# set in here doesn't exist anymore once this script exits.
+echo "${GPU_DETECTED}" > "${GPU_FLAG_FILE}"
 
-# cd happens *before* pkexec, not inside a command it elevates -- cwd is
-# inherited across fork/exec same as any other child process, so this
-# still lands docker compose in CONF_DIR (needed for the compose file's
-# relative "./oem" mount) without depending on $HOME surviving elevation.
-progress 35 "Starting the Windows virtual machine..."
+# cd happens before docker compose runs, same reasoning as always: cwd
+# is inherited across fork/exec, so this still lands docker compose in
+# CONF_DIR (needed for the compose file's relative "./oem" mount).
+echo "PROGRESS 35 Starting the Windows virtual machine..."
 COMPOSE_LOG="$(mktemp)"
-if ! ( cd "${CONF_DIR}" && pkexec docker compose "${COMPOSE_ARGS[@]}" up -d ) > "${COMPOSE_LOG}" 2>&1; then
+if ! ( cd "${CONF_DIR}" && docker compose "${COMPOSE_ARGS[@]}" up -d ) > "${COMPOSE_LOG}" 2>&1; then
   logger -t kibaos-winapps-setup "docker compose up -d failed: $(cat "${COMPOSE_LOG}")"
   rm -f "${COMPOSE_LOG}"
-  fail "Windows Workspace couldn't start -- nothing was changed permanently, retry from the app menu."
+  echo "PROGRESS 100 Setup failed: Windows Workspace couldn't start -- nothing was changed permanently, retry from the app menu."
+  echo "FATAL: Windows Workspace couldn't start -- nothing was changed permanently, retry from the app menu." >&2
+  chown -R "${ORIG_USER}:${ORIG_USER}" "${CONF_DIR}" 2>/dev/null || true
+  exit 1
 fi
 rm -f "${COMPOSE_LOG}"
+
+# Everything under CONF_DIR was just written as root -- hand it back to
+# the real account before this script exits, or the desktop session that
+# reads compose.yaml/winapps.conf right after can't even open its own
+# config files. The root-only password note under /etc/kibaos is
+# deliberately NOT included in this -- that one's meant to stay root-only.
+chown -R "${ORIG_USER}:${ORIG_USER}" "${CONF_DIR}" 2>/dev/null || true
+PRIVILEGED
+chmod +x "${PRIV_SCRIPT}"
+
+# PROGRESS/FATAL lines the privileged script echoes above reach the
+# frontend exactly the way every other line in this file does -- pkexec
+# doesn't touch stdout/stderr, so they just flow straight through.
+pkexec bash "${PRIV_SCRIPT}" "${CONF_DIR}" "${COMPOSE_FILE}" "${NVIDIA_HW}" "${ORIG_USER}" "${GPU_FLAG_FILE}"
+PRIV_STATUS=$?
+rm -f "${PRIV_SCRIPT}"
+if [ "${PRIV_STATUS}" -eq 126 ] || [ "${PRIV_STATUS}" -eq 127 ]; then
+  # pkexec's own failure codes for "authentication wasn't completed" (the
+  # dialog was dismissed/cancelled) or "couldn't even run the command" --
+  # in both cases the privileged script never got to run, so it never
+  # got a chance to print its own FATAL: line. This is the one failure
+  # mode that still needs one from out here.
+  rm -f "${GPU_FLAG_FILE}"
+  fail "Windows Workspace setup needs administrator access to continue -- retry from the app menu when you're ready to authenticate."
+elif [ "${PRIV_STATUS}" -ne 0 ]; then
+  # Any other nonzero status means the privileged script itself ran and
+  # hit a real problem -- it already logged specifics and printed its
+  # own PROGRESS 100/FATAL: pair above, so there's nothing left to add;
+  # just stop.
+  rm -f "${GPU_FLAG_FILE}"
+  exit "${PRIV_STATUS}"
+fi
+GPU_DETECTED="$(cat "${GPU_FLAG_FILE}" 2>/dev/null || echo 0)"
+rm -f "${GPU_FLAG_FILE}"
 
 # No chromium launch here on purpose. Opening a browser window is a UI
 # concern that belongs to whatever's driving this backend, not something
