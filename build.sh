@@ -2690,9 +2690,7 @@ openbsd-netcat
 zenity
 pciutils
 
-# ── Security ────────────────────────────────────────────────────────────
-apparmor
-firejail
+# ── Security ───────────────────────────────────────────────────────────
 
 # ── Storage/initcpio support ─────────────────────────────────────────────
 lvm2
@@ -7446,7 +7444,7 @@ systemctl enable systemd-tmpfiles-clean.timer
 # once that param is active -- profile enforcement (aa-enforce/aa-complain
 # for individual apps) is left to Remi/the end user, since KibaOS doesn't
 # curate its own profile set.
-systemctl enable apparmor
+
 
 # Firejail: firecfg symlinks /usr/local/bin/<app> -> /usr/bin/firejail for
 # every desktop app it recognizes a sandbox profile for (found by scanning
@@ -7458,7 +7456,6 @@ systemctl enable apparmor
 # denied in confusing ways) -- if something sandboxed misbehaves, check
 # `aa-status`/`journalctl` for AppArmor DENIED lines before assuming it's
 # just a firejail bug.
-firecfg 2>/dev/null || true
 
 # ── Size reduction ─────────────────────────────────────────────────────────
 rm -rf /var/cache/pacman/pkg/*
