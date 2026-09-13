@@ -7497,7 +7497,7 @@ chown -R 1000:1000 /home/liveuser
 # pulls in -- so the script below just calls `dconf` directly, no
 # dbus-run-session wrapper, because there's a real bus to talk to this time.
 mkdir -p /usr/local/bin
-cat > /usr/local/bin/kibaos-panelfix << 'PANELFIX'
+# cat > /usr/local/bin/kibaos-panelfix << 'PANELFIX'
 #!/usr/bin/env bash
 # Provisions liveuser's Budgie panel/dock. Runs as a systemd --user oneshot
 # (see kibaos-panelfix.service) once graphical-session.target is reached,
