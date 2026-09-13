@@ -3499,6 +3499,10 @@ git clone https://github.com/KibaLabsLLC/Roko
 cd Roko
 bash build.sh
 cd ..
+git clone https://github.com/tortr-rs/goget.git
+cd goget
+make 
+make install
 set -euo pipefail
 git clone --depth 1 https://github.com/KibaLabsLLC/Okami.git
 cd Okami
