@@ -2558,6 +2558,7 @@ xdg-user-dirs
 noto-fonts
 noto-fonts-emoji
 noto-fonts-cjk
+go
 bluez-utils
 switchboard-plug-desktop
 switchboard-plug-display
