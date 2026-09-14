@@ -2559,6 +2559,7 @@ noto-fonts
 noto-fonts-emoji
 noto-fonts-cjk
 bluez-utils
+go
 switchboard-plug-desktop
 switchboard-plug-display
 switchboard-plug-network
