@@ -2558,7 +2558,6 @@ xdg-user-dirs
 noto-fonts
 noto-fonts-emoji
 noto-fonts-cjk
-go
 bluez-utils
 switchboard-plug-desktop
 switchboard-plug-display
@@ -4058,20 +4057,6 @@ cat > /etc/gtk-3.0/gtk.css << 'GTK3PANEL'
     transition: border-color 200ms cubic-bezier(0.22, 1, 0.36, 1);
 }
 
-/* === KibaOS: top badge pill (dock-mode, shrink-wrapped to one applet) ===
- * The generic .budgie-panel rule above was sized for the full-width
- * bottom dock (120px side insets, 8px bottom gap only) -- that doesn't
- * read right on a panel that's already shrunk to fit a single icon, so
- * override its margin specifically for the top instance: a small top
- * gap so it floats off the very edge of the screen, and a small left
- * inset so it sits near the corner without touching it, matching the
- * badge's position in the mockup. Radius/background/shadow are all
- * still inherited from .budgie-panel above -- only the margin changes. */
-.top .budgie-panel.dock-mode {
-    margin: 8px 0 0 24px;
-    padding: 0 6px;
-}
-
 /* === KibaOS: Raven (notification + quick-settings sidebar) as a floating glass card === */
 frame.raven-frame,
 .raven-background {
@@ -5554,85 +5539,77 @@ gsettings set org.nemo.preferences default-folder-viewer       'icon-view'
 gsettings set org.nemo.icon-view default-zoom-level            'standard'
 gsettings set org.nemo.preferences show-location-entry         false
 
-# ── Panel config, schema verified straight from upstream source ──────────
-# (src/panel/manager.vala, BuddiesOfBudgie/budgie-desktop main branch), so
-# this isn't a guess:
-#   ROOT_SCHEMA      = com.solus-project.budgie-panel          (hyphenated!)
-#   TOPLEVEL_PREFIX  = /com/solus-project/budgie-panel/panels
-#   PANEL_KEY_POSITION    = "location"       (not "position")
-#   PANEL_KEY_SHADOW      = "enable-shadow"  (not "shadow")
-#   PANEL_KEY_APPLETS     = "applets"        (flat ordered UUID list)
-#
-# GSettings equivalent:
-#   ROOT_SCHEMA      = com.solus-project.budgie-panel
-#   PANEL_SCHEMA     = com.solus-project.budgie-panel.panel
-#   PANEL_PATH       = /com/solus-project/budgie-panel/panels/{uuid}/
-#
-# The panel schema is relocatable, so the UUID path is supplied directly
-# to gsettings after the schema name.
-#
-# UPDATE — found the actual root cause of the giant-white-panel bug
-# (screenshots showed what should've been a slim floating bar rendering
-# as a near-fullscreen white rectangle, on more than one build/compositor,
-# which never made sense as a compositor issue): pulled the real
-# com.solus-project.budgie-panel.gschema.xml straight from budgie-desktop
-# source. The "location" and "transparency" keys are enums, and GSettings
-# enum nicks are case-sensitive — this whole block was writing 'BOTTOM'/
-# 'TOP'/'NONE' (uppercase) against a schema whose actual nicks are
-# lowercase ('bottom'/'top'/'none'). An enum write that doesn't match any
-# defined nick doesn't error, it just silently falls back to the schema
-# default -- which for "location" is 'none' (no screen edge at all). A
-# panel with no assigned edge has nothing to size itself against, which is
-# exactly the "unconstrained giant rectangle" shape in the photos.
-# Fixed below and on the TOP panel + the liveuser duplicate path further
-# down. (dock-mode, separately: also confirmed for real in that same
-# gschema.xml — type b, default false, "resize to house content" — so
-# that part was already correct.)
+touch "${STAMP}"
 
+FIRSTLOGIN
+chmod +x /usr/local/bin/kibaos-first-login
+
+# ══════════════════════════════════════════════════════════════════════════
+# PANEL GUARD -- runs every login, not just the first
+# ══════════════════════════════════════════════════════════════════════════
+# The panel setup used to live in kibaos-first-login above, one-shot and
+# stamp-guarded like everything else there. That's fine for preferences
+# (theme, wallpaper, workspace count) -- if those are wrong, at worst you
+# reset them yourself. Panels are different: on more than one report, a
+# freshly-configured install came back on the *second* login with a bare
+# top panel and no bottom dock at all, i.e. exactly Budgie's own built-in
+# fallback layout, not ours.
+#
+# Root cause, straight from budgie-desktop's own manager.vala
+# (BuddiesOfBudgie/budgie-desktop, src/panel/manager.vala): panel startup
+# calls load_panels(), and only calls create_default(default_layout) --
+# Budgie's own stock single-panel layout -- if that load comes back empty.
+# There's also do_live_reset(), a *separate* path that fires on a failed
+# load *after* panels were already loaded once: it deletes every panel
+# and dconf-resets the whole panels tree before falling back to that same
+# default. Budgie's icon-tasklist applet is the documented trigger for
+# exactly that (solus-project/budgie-desktop#1480: a pinned-launchers
+# entry pointing at a .desktop file that doesn't exist crashes the panel
+# on load) -- the find_desktop_id() probe below already guards the .desktop
+# IDs actually written into pinned-launchers, but nothing guarantees every
+# one of those apps' indexing is settled at the exact moment panel load
+# happens on every future boot, only that it was at the moment this script
+# last ran. If a crash-and-reset ever fires, dconf keeps whatever default
+# layout Budgie fell back to -- and a one-shot, stamp-guarded fix has
+# already run and will never touch it again.
+#
+# So: no stamp here. Cheap check, every login -- if a bottom panel already
+# exists, do nothing at all (this is the common case, pure no-op). Only
+# if one doesn't -- first login ever, or Budgie wiped it out from under
+# us since -- does this actually rebuild anything. Whatever stray
+# panel/applet UUIDs Budgie's own fallback left behind just go unreferenced
+# in dconf; harmless, and simpler than trying to hunt them down and clean
+# them up.
+cat > /usr/local/bin/kibaos-panel-guard << 'PANELGUARD'
+#!/usr/bin/env bash
 PANEL_SCHEMA="com.solus-project.budgie-panel"
 PANEL_INSTANCE_SCHEMA="com.solus-project.budgie-panel.panel"
 PANEL_BASE="/com/solus-project/budgie-panel/panels/"
 
-PANEL_UUID=$(gsettings get "${PANEL_SCHEMA}" panels 2>/dev/null | \
-  tr -d "[]' " | cut -d',' -f1)
+EXISTING_UUIDS=$(gsettings get "${PANEL_SCHEMA}" panels 2>/dev/null | tr -d "[]'" | tr ',' ' ')
+for uuid in ${EXISTING_UUIDS}; do
+  loc=$(gsettings get "${PANEL_INSTANCE_SCHEMA}:${PANEL_BASE}{${uuid}}/" location 2>/dev/null)
+  [ "${loc}" = "'bottom'" ] && exit 0
+done
 
-if [ -z "${PANEL_UUID}" ]; then
-  PANEL_UUID=$(uuidgen)
-  gsettings set "${PANEL_SCHEMA}" panels "['${PANEL_UUID}']"
-fi
-
-TOP_PANEL_UUID=$(gsettings get "${PANEL_SCHEMA}" panels 2>/dev/null | \
-  tr -d "[]' " | cut -d',' -f2)
-
-[ -z "${TOP_PANEL_UUID}" ] && TOP_PANEL_UUID=$(uuidgen)
-
+# No bottom panel found -- either nothing's been configured yet, or
+# Budgie's own load-failure recovery reset things since we last ran.
+# Rebuild it from scratch; see the comment above this script for why.
+PANEL_UUID=$(uuidgen)
+gsettings set "${PANEL_SCHEMA}" panels "['${PANEL_UUID}']"
 PANEL_PATH="${PANEL_BASE}{${PANEL_UUID}}/"
 
-gsettings set \
-  "${PANEL_INSTANCE_SCHEMA}:${PANEL_PATH}" \
-  location bottom
+gsettings set "${PANEL_INSTANCE_SCHEMA}:${PANEL_PATH}" location bottom
+gsettings set "${PANEL_INSTANCE_SCHEMA}:${PANEL_PATH}" size 42
+gsettings set "${PANEL_INSTANCE_SCHEMA}:${PANEL_PATH}" transparency none
+gsettings set "${PANEL_INSTANCE_SCHEMA}:${PANEL_PATH}" enable-shadow true
 
-gsettings set \
-  "${PANEL_INSTANCE_SCHEMA}:${PANEL_PATH}" \
-  size 42
-
-gsettings set \
-  "${PANEL_INSTANCE_SCHEMA}:${PANEL_PATH}" \
-  transparency none
-
-gsettings set \
-  "${PANEL_INSTANCE_SCHEMA}:${PANEL_PATH}" \
-  enable-shadow true
-
-
-# ── Centered dock: applets + pinned launchers, matching the mockup's order ─
 # Budgie's icon-tasklist applet will PERMANENTLY crash the session on
 # every future login if pinned-launchers points at a .desktop file that
 # doesn't actually exist (solus-project/budgie-desktop#1480 — confirmed
 # this happens, not a maybe). so: probe the real filesystem for whichever
 # desktop-id variant actually got installed, instead of hardcoding a
 # guess and hoping it's right.
-
 find_desktop_id() {
   for candidate in "$@"; do
     [ -f "/usr/share/applications/${candidate}" ] && {
@@ -5644,7 +5621,6 @@ find_desktop_id() {
 }
 
 DOCK_LAUNCHERS=()
-
 for ids in \
   "kibaos-files.desktop nemo.desktop" \
   "org.gnome.Calendar.desktop gnome-calendar.desktop" \
@@ -5658,29 +5634,14 @@ do
   FOUND=$(find_desktop_id ${ids}) && DOCK_LAUNCHERS+=("${FOUND}")
 done
 
-
-# each applet UUID needs two things written: (1) a generic "which plugin
-# is this UUID" lookup entry, and (2) that plugin's OWN settings at ITS
-# OWN settings-prefix. (1) I got by direct structural analogy to the
-# now-confirmed TOPLEVEL_SCHEMA/TOPLEVEL_PREFIX pattern above — haven't
-# directly observed this exact const in source the way I did for the
-# panel schema, so flagging it as the one remaining inferential step if
-# applets don't show up. (2) for icon-tasklist specifically IS directly
-# confirmed: Budgie's own docs give the Budgie Menu applet's
-# settings-prefix as /com/solus-project/budgie-panel/instance/budgie-menu/
-# {uuid}, same pattern applies to icon-tasklist's instance path below.
-
 add_applet() {
   local plugin_name="$1"
   local uuid
-
   uuid=$(uuidgen)
-
   gsettings set \
     "com.solus-project.budgie-panel.applet:/com/solus-project/budgie-panel/applets/{${uuid}}/" \
     name \
     "${plugin_name}"
-
   echo "${uuid}"
 }
 
@@ -5688,73 +5649,20 @@ MENU_UUID=$(add_applet "budgie-menu")
 TASKLIST_UUID=$(add_applet "icon-tasklist")
 CLOCK_UUID=$(add_applet "clock")
 
-ALL_APPLETS="['${MENU_UUID}', '${TASKLIST_UUID}', '${CLOCK_UUID}']"
-
 gsettings set \
-  "${PANEL_INSTANCE_SCHEMA}:${PANEL_BASE}{${PANEL_UUID}}/" \
+  "${PANEL_INSTANCE_SCHEMA}:${PANEL_PATH}" \
   applets \
-  "${ALL_APPLETS}"
+  "['${MENU_UUID}', '${TASKLIST_UUID}', '${CLOCK_UUID}']"
 
 if [ "${#DOCK_LAUNCHERS[@]}" -gt 0 ]; then
   LAUNCHERS_GVARIANT=$(printf "'%s', " "${DOCK_LAUNCHERS[@]}")
-
   gsettings set \
     "com.solus-project.budgie-panel.icon-tasklist:/com/solus-project/budgie-panel/instance/icon-tasklist/{${TASKLIST_UUID}}/" \
     pinned-launchers \
     "[${LAUNCHERS_GVARIANT%, }]"
 fi
-
-
-# ── Second panel: floating top-left badge, opens Raven ──────────────────────
-# Just the KibaOS badge -- no app grid, no workspace numbers, no clock/
-# battery/wifi icons living directly in the bar itself. Clicking it pops
-# Raven open (same "control center" pane shown in the mockup: volume,
-# Wi-Fi, Bluetooth, Night Light, Power Mode), which is exactly what the
-# raven-trigger applet's one job already is -- nothing custom to build
-# here. dock-mode shrinks the panel to fit just that one applet instead
-# of spanning full width, and the .top .budgie-panel.dock-mode CSS rule
-# in gtk-3.0/gtk.css (see KIBAOS ORGANIC MOTION LANGUAGE above) turns
-# that shrink-wrapped bar into the small rounded floating pill.
-
-gsettings set \
-  "${PANEL_SCHEMA}" \
-  panels \
-  "['${PANEL_UUID}', '${TOP_PANEL_UUID}']"
-
-TOP_PANEL_PATH="${PANEL_BASE}{${TOP_PANEL_UUID}}/"
-
-gsettings set \
-  "${PANEL_INSTANCE_SCHEMA}:${TOP_PANEL_PATH}" \
-  location top
-
-gsettings set \
-  "${PANEL_INSTANCE_SCHEMA}:${TOP_PANEL_PATH}" \
-  size 40
-
-gsettings set \
-  "${PANEL_INSTANCE_SCHEMA}:${TOP_PANEL_PATH}" \
-  transparency none
-
-gsettings set \
-  "${PANEL_INSTANCE_SCHEMA}:${TOP_PANEL_PATH}" \
-  enable-shadow true
-
-gsettings set \
-  "${PANEL_INSTANCE_SCHEMA}:${TOP_PANEL_PATH}" \
-  dock-mode true
-
-RAVEN_UUID=$(add_applet "raven-trigger")
-
-gsettings set \
-  "${PANEL_INSTANCE_SCHEMA}:${TOP_PANEL_PATH}" \
-  applets \
-  "['${RAVEN_UUID}']"
-
-
-touch "${STAMP}"
-
-FIRSTLOGIN
-chmod +x /usr/local/bin/kibaos-first-login
+PANELGUARD
+chmod +x /usr/local/bin/kibaos-panel-guard
 
 cat > "${SKEL}/.config/autostart/kibaos-configure.desktop" << 'AUTOCFG'
 [Desktop Entry]
@@ -5765,6 +5673,20 @@ Hidden=false
 NoDisplay=true
 X-GNOME-Autostart-enabled=true
 AUTOCFG
+
+# No Hidden/marker-file gate here on purpose -- unlike kibaos-configure.desktop
+# above, this one is meant to run every single login (see the comment on
+# kibaos-panel-guard itself for why); it self-limits via the bottom-panel
+# check inside the script instead, not via autostart-once semantics.
+cat > "${SKEL}/.config/autostart/kibaos-panel-guard.desktop" << 'PANELGUARDDESK'
+[Desktop Entry]
+Type=Application
+Name=KibaOS Panel Guard
+Exec=/usr/local/bin/kibaos-panel-guard
+Hidden=false
+NoDisplay=true
+X-GNOME-Autostart-enabled=true
+PANELGUARDDESK
 
 # ── OEM-mode autostart: launches io.kibaos.oobe (which self-detects
 # OEM-finish mode via /etc/kibaos/oem-pending, see main.vala) on login to
