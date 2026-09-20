@@ -40,7 +40,7 @@
 ---
 
 <p align="center">
-  <img width="1000" alt="KibaOS Desktop Screenshot" src="https://raw.githubusercontent.com/KibaLabsLLC/Kiba/main/branding/IMG_0168.png" />
+  <img width="1000" alt="KibaOS Desktop Screenshot" src="https://distrowatch.com/images/slinks/kibaos.png">
 </p>
 
 ---
