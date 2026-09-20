@@ -3520,17 +3520,22 @@ mkdir -p "/usr/lib/systemd/system"
 cat > "/usr/lib/systemd/system/kibad.service" <<'EOF'
 [Unit]
 Description=KibaD Hardware Telemetry Daemon
-After=network-online.target
+After=graphical-session.target
 Wants=network-online.target
 
 [Service]
+User=1000
+ExecStartPre=+/usr/bin/chown -R 1000:1000 /var/lib/kibad
+Environment="WAYLAND_DISPLAY=wayland-0"
+Environment="XDG_RUNTIME_DIR=/run/user/1000"
+Environment="DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus"
 Type=simple
 ExecStart=/usr/lib/kibad/kibad
 Restart=on-failure
 RestartSec=10
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=graphical-session.target
 EOF
 
 # Build KibaD
