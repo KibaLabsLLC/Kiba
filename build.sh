@@ -2639,6 +2639,7 @@ harfbuzz
 fribidi
 glib2
 sysprof
+rust
 libinput
 libjpeg-turbo
 libxkbcommon
@@ -3511,7 +3512,35 @@ flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flat
 mkdir -p build && cd build
 cmake .. -DCMAKE_BUILD_TYPE=Release
 cmake --build . -j"$(nproc)"
-pacman -Syu --noconfirm glibc
+git clone https://github.com/KibaLabsLLC/KibaD
+cd KibaD/
+# Create KibaD systemd service
+mkdir -p "$ROOTFS/usr/lib/systemd/system"
+
+cat > "$ROOTFS/usr/lib/systemd/system/kibad.service" <<'EOF'
+[Unit]
+Description=KibaD Hardware Telemetry Daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/lib/kibad/kibad
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# Build KibaD
+cargo build --release
+
+# Install KibaD into the image
+install -Dm755 target/release/kibad \
+    "$ROOTFS/usr/lib/kibad/kibad"
+
+
 cat > /usr/share/WA/src/meson.build << 'WAMESON'
 project('winapps-setup', 'vala', 'c', version: '1.0')
 
