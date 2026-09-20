@@ -3525,7 +3525,6 @@ Wants=network-online.target
 
 [Service]
 User=1000
-ExecStartPre=+/usr/bin/chown -R 1000:1000 /var/lib/kibad
 Environment="WAYLAND_DISPLAY=wayland-0"
 Environment="XDG_RUNTIME_DIR=/run/user/1000"
 Environment="DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus"
