@@ -3515,9 +3515,9 @@ cmake --build . -j"$(nproc)"
 git clone https://github.com/KibaLabsLLC/KibaD
 cd KibaD/
 # Create KibaD systemd service
-mkdir -p "$ROOTFS/usr/lib/systemd/system"
+mkdir -p "/usr/lib/systemd/system"
 
-cat > "$ROOTFS/usr/lib/systemd/system/kibad.service" <<'EOF'
+cat > "/usr/lib/systemd/system/kibad.service" <<'EOF'
 [Unit]
 Description=KibaD Hardware Telemetry Daemon
 After=network-online.target
@@ -3538,7 +3538,7 @@ cargo build --release
 
 # Install KibaD into the image
 install -Dm755 target/release/kibad \
-    "$ROOTFS/usr/lib/kibad/kibad"
+    "/usr/lib/kibad/kibad"
 
 
 cat > /usr/share/WA/src/meson.build << 'WAMESON'
