@@ -7699,6 +7699,23 @@ if [ "$(uname -m)" = "aarch64" ]; then
   mkinitcpio -k "${_kver}" -c /etc/mkinitcpio.conf.d/archiso.conf -g /boot/initramfs-linux.img
 fi
 
+# ── tear down any gvfs FUSE mount left over from the dbus-run-session calls ──
+# Some gio/gsettings/dconf call earlier in this script can D-Bus-activate
+# gvfsd + gvfsd-fuse, which mounts /root/.gvfs (or $XDG_RUNTIME_DIR/gvfs)
+# inside the airootfs and never unmounts it. mkarchiso's cleanup step then
+# runs `find` over the whole airootfs, hits that dead mount, and dies with
+# "Transport endpoint is not connected" (exit 1) -- AFTER the ISO is already
+# built. Kill the daemons and lazy-unmount before handing the tree back.
+pkill -x gvfsd-fuse 2>/dev/null || true
+pkill -x gvfsd 2>/dev/null || true
+pkill -x dbus-daemon 2>/dev/null || true
+sleep 1
+for _gvfs in /root/.gvfs /run/user/*/gvfs /home/*/.gvfs; do
+  [ -e "${_gvfs}" ] || [ -L "${_gvfs}" ] || continue
+  fusermount3 -uz "${_gvfs}" 2>/dev/null || fusermount -uz "${_gvfs}" 2>/dev/null || umount -l "${_gvfs}" 2>/dev/null || true
+  rmdir "${_gvfs}" 2>/dev/null || true
+done
+
 # ── blank the machine-id back out for shipping ───────────────────────────
 # Re-clear the temporary real ID set near the top of this script (needed
 # only so dbus-run-session/dconf calls above had a working session bus
