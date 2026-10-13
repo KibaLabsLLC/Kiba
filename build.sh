@@ -382,7 +382,7 @@ PACMANCONF
   # itself is screen-size-aware (see its own `isPhone` check), so the
   # exact same file already renders touch-friendly on a phone panel and
   # unchanged on a desktop one -- no separate mobile QML needed.
-  KIBA_WALLPAPER_URL="https://github.com/WolfTech-Innovations/Kiba/blob/main/assets/wallpapers/wallpaper.png?raw=true"
+  KIBA_WALLPAPER_URL="https://raw.githubusercontent.com/KibaLabsLLC/Kiba/refs/heads/main/assets/wallpapers/F700436B-3FFC-4570-8BD2-623082C75533.png"
   KIBA_BOOT_SPLASH_URL="https://github.com/WolfTech-Innovations/Kiba/blob/main/assets/splash/splash.png?raw=true"
   mkdir -p "${_root}/usr/share/kibaos"
 
@@ -2597,6 +2597,14 @@ pkg-config
 gdm
 budgie-desktop
 budgie-session
+# budgie-extras = Ubuntu Budgie's applet suite (VisualSpace, Window Shuffler,
+# Previews, Quickchar, etc). In Arch's [extra] repo -- Raven itself is part
+# of budgie-desktop, nothing separate to install for it.
+budgie-extras
+# Budgie Welcome (Ubuntu Budgie's greeter app, installed from source below)
+# is a Python + WebKit GTK app; sassc compiles its stylesheet
+webkit2gtk-4.1
+python-gobject
 labwc
 swaybg
 grim
@@ -3146,7 +3154,7 @@ systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target 
 # ══════════════════════════════════════════════════════════════════════════
 # BRANDING ASSETS
 # ══════════════════════════════════════════════════════════════════════════
-WALLPAPER_URL="https://github.com/WolfTech-Innovations/Kiba/blob/main/assets/wallpapers/wallpaper.png?raw=true"
+WALLPAPER_URL="https://raw.githubusercontent.com/KibaLabsLLC/Kiba/refs/heads/main/assets/wallpapers/F700436B-3FFC-4570-8BD2-623082C75533.png"
 # One shared source image now backs both the app-icon set (kibaos.png /
 # hicolor icons) and the Plymouth boot splash. This asset (unlike the old
 # one this pipeline used to point at) is already a single centered square
@@ -5683,10 +5691,23 @@ MENU_UUID=$(add_applet "budgie-menu")
 TASKLIST_UUID=$(add_applet "icon-tasklist")
 CLOCK_UUID=$(add_applet "clock")
 
+# Raven trigger (opens the Raven notification/quick-settings sidebar) is
+# built into budgie-desktop (module raventriggerapplet). VisualSpace comes
+# from budgie-extras -- probed for on disk first so a missing plugin can
+# never leave a dangling applet entry in the panel layout.
+RAVEN_UUID=$(add_applet "raventriggerapplet")
+APPLET_LIST="'${MENU_UUID}', '${TASKLIST_UUID}'"
+if ls /usr/lib/budgie-desktop/plugins/visualspace/visualspace.so \
+      /usr/lib/budgie-desktop/plugins/visualspace.so >/dev/null 2>&1; then
+  VSPACE_UUID=$(add_applet "visualspace")
+  APPLET_LIST="${APPLET_LIST}, '${VSPACE_UUID}'"
+fi
+APPLET_LIST="${APPLET_LIST}, '${RAVEN_UUID}', '${CLOCK_UUID}'"
+
 gsettings set \
   "${PANEL_INSTANCE_SCHEMA}:${PANEL_PATH}" \
   applets \
-  "['${MENU_UUID}', '${TASKLIST_UUID}', '${CLOCK_UUID}']"
+  "[${APPLET_LIST}]"
 
 if [ "${#DOCK_LAUNCHERS[@]}" -gt 0 ]; then
   LAUNCHERS_GVARIANT=$(printf "'%s', " "${DOCK_LAUNCHERS[@]}")
@@ -6539,6 +6560,76 @@ mkdir -p /usr/share/kibaos-welcome
 
 # Update GTK_THEME in environment to use KibaOS
 sed -i 's/GTK_THEME=Adwaita-dark/GTK_THEME=KibaOS/' /etc/environment
+
+# ── Budgie Welcome (UbuntuBudgie/budgie-welcome) ───────────────────────────
+# No Arch package exists (Ubuntu ships it as a deb/snap), so install it from
+# source, same clone-and-copy approach as the Numix icons. Two Ubuntu-isms
+# need handling: it hard-imports `apt` (python-apt) and `notify2` at the top
+# of the script, neither of which exists on Arch -- tiny stub modules kept in
+# its own private dir (not site-packages) satisfy those imports. Its
+# "install software" pages still call apt/snap and won't do anything on
+# KibaOS; the info/tour/applet-showcase pages work fine. Not autostarted --
+# KibaOS already has its own first-run flow -- just launchable from the menu.
+# Wrapped in a subshell + `|| echo` so a GitHub hiccup can't fail the ISO build.
+(
+  set -e
+  BW_SRC="/tmp/budgie-welcome"
+  rm -rf "${BW_SRC}"
+  git clone --depth 1 https://github.com/UbuntuBudgie/budgie-welcome.git "${BW_SRC}"
+  cd "${BW_SRC}"
+  # no uglifyjs on the build host: the HTML references *.min.js, so the
+  # unminified sources just get copied under the .min names
+  for _js in bootstrap baguetteBox popper; do
+    cp "data/js/${_js}.js" "data/js/${_js}.min.js"
+  done
+  bash sassc-compile.sh
+  mkdir -p /usr/share/budgie-welcome /usr/lib/budgie-welcome /usr/share/budgie-welcome-shims
+  cp -r data/. /usr/share/budgie-welcome/
+  install -Dm755 budgie-welcome /usr/lib/budgie-welcome/budgie-welcome.py
+  install -Dm755 budgie-welcome-privileged-actions /usr/lib/budgie-welcome/budgie-welcome-privileged-actions
+  install -Dm644 org.budgie.welcome.policy /usr/share/polkit-1/actions/org.budgie.welcome.policy
+  install -Dm644 budgie-welcome.1 /usr/share/man/man1/budgie-welcome.1
+
+  cat > /usr/share/budgie-welcome-shims/apt.py << 'APTSHIM'
+# Stub for Ubuntu's python-apt -- just enough for budgie-welcome to import.
+class Cache(dict):
+    def __getitem__(self, k): raise KeyError(k)
+    def __contains__(self, k): return False
+    def has_key(self, k): return False
+    def open(self, *a, **k): pass
+    def close(self, *a, **k): pass
+APTSHIM
+  cat > /usr/share/budgie-welcome-shims/notify2.py << 'NOTIFYSHIM'
+# Stub for notify2 -- real notifications go through libnotify elsewhere.
+def init(*a, **k): return True
+class Notification:
+    def __init__(self, *a, **k): pass
+    def show(self): return True
+    def set_timeout(self, *a): pass
+    def add_action(self, *a, **k): pass
+NOTIFYSHIM
+
+  cat > /usr/bin/budgie-welcome << 'BWLAUNCH'
+#!/bin/sh
+export PYTHONPATH="/usr/share/budgie-welcome-shims${PYTHONPATH:+:${PYTHONPATH}}"
+exec python3 /usr/lib/budgie-welcome/budgie-welcome.py "$@"
+BWLAUNCH
+  chmod 755 /usr/bin/budgie-welcome
+
+  cat > /usr/share/applications/budgie-welcome.desktop << 'BWDESKTOP'
+[Desktop Entry]
+Type=Application
+Name=Budgie Welcome
+Comment=Find out about your desktop and Budgie applets
+Exec=budgie-welcome
+Icon=help-about
+Terminal=false
+Categories=Utility;GTK;
+Keywords=welcome;budgie;tour;applets;
+BWDESKTOP
+  rm -rf "${BW_SRC}"
+) && echo "=== Budgie Welcome installed ===" \
+  || echo "!! Budgie Welcome install failed -- continuing without it" >&2
 
 # DESKTOP SHORTCUTS
 # ══════════════════════════════════════════════════════════════════════════
@@ -7550,6 +7641,8 @@ for _desktop_file in /usr/share/applications/*.desktop; do
   [ -f "${_desktop_file}" ] || continue
   _basename=$(basename "${_desktop_file}")
   _name_line=$(grep -m1 '^Name=' "${_desktop_file}" 2>/dev/null || true)
+  # Budgie Welcome is added on purpose (see "Budgie Welcome" install above)
+  [ "${_basename}" = "budgie-welcome.desktop" ] && continue
   if echo "${_basename}" | grep -qi 'budgie' || echo "${_name_line}" | grep -qi 'budgie'; then
     if grep -q '^NoDisplay=' "${_desktop_file}"; then
       sed -i 's/^NoDisplay=.*/NoDisplay=true/' "${_desktop_file}"
