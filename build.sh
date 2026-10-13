@@ -2601,13 +2601,6 @@ budgie-session
 # Previews, Quickchar, etc). In Arch's [extra] repo -- Raven itself is part
 # of budgie-desktop, nothing separate to install for it.
 budgie-extras
-# KibaOS desktop apps (official Arch packages)
-kooha
-malcontent
-file-roller
-gnome-photos
-haruna
-# Joplin is installed from Flathub during first-login setup (not an official Arch package).
 # Budgie Welcome (Ubuntu Budgie's greeter app, installed from source below)
 # is a Python + WebKit GTK app; sassc compiles its stylesheet
 webkit2gtk-4.1
@@ -2690,6 +2683,17 @@ v4l2loopback-dkms
 xdg-utils
 gawk
 totem
+# Apps: Kooha (screen recorder), Malcontent (parental controls), File Roller
+# (archive manager), Photos (GNOME Photos), Haruna (video player). Joplin
+# isn't in the official repos -- installed from its AppImage further down.
+kooha
+malcontent
+# VibePanel's one runtime lib not already in the list (bluez, upower,
+# networkmanager, libpulse/pipewire-pulse are all installed above)
+gtk4-layer-shell
+file-roller
+gnome-photos
+haruna
 gstreamer
 gst-plugins-base
 gst-plugins-good
@@ -3993,7 +3997,8 @@ mkdir -p /usr/share/themes/KibaOS/gtk-4.0
 mkdir -p /etc/gtk-3.0
 cat > /etc/gtk-3.0/settings.ini << 'GTK3RC'
 [Settings]
-gtk-theme-name=KibaOS
+gtk-theme-name=Adwaita-dark
+gtk-application-prefer-dark-theme=1
 gtk-icon-theme-name=Numix-Circle
 gtk-font-name=Noto Sans 11
 gtk-cursor-theme-size=24
@@ -4002,6 +4007,14 @@ gtk-xft-hinting=1
 gtk-xft-hintstyle=hintslight
 gtk-xft-rgba=rgb
 GTK3RC
+
+# GTK4/libadwaita apps (File Roller, Kooha, Loupe...) also default to dark
+mkdir -p /etc/gtk-4.0
+cat > /etc/gtk-4.0/settings.ini << 'GTK4RC'
+[Settings]
+gtk-application-prefer-dark-theme=1
+gtk-icon-theme-name=Numix-Circle
+GTK4RC
 
 # QT THEME - Install KibaOS custom Qt theme
 mkdir -p /usr/share/Kvantum/KibaOS/config
@@ -4067,36 +4080,39 @@ cat > /etc/gtk-3.0/gtk.css << 'GTK3PANEL'
 /* === KibaOS: Floating rounded-rectangle panel === */
 .budgie-panel {
     margin: 0 120px 8px 120px;
-    /* Uniform 18px radius -- a clean rounded rectangle, not a full pill
-     * (half of the 42px panel height is 21px, so 18px stays short of
-     * that and keeps flat top/bottom edges between the corners). */
-    border-radius: 18px;
-    background-color: #ffffff;
-    /* Dark text/icon color so content stays legible against the now-solid
-     * white background -- the previous navy-glass version relied on the
-     * system dark theme's light-on-dark defaults, which would render
-     * invisible (white-on-white) once the background switched to white. */
-    color: #1a2030;
-    border: 1px solid rgba(0, 0, 0, 0.08);
+    /* Square corners -- no rounding at all. */
+    border-radius: 0;
+    /* Frosted glass, dark: semi-transparent navy with a faint top-down
+     * light gradient and a bright hairline border for the "glass edge".
+     * GTK3 CSS has NO backdrop-filter, so the actual blur-behind can't be
+     * done from here -- it needs compositor support (KWin's Blur effect).
+     * Under labwc this renders as translucent tinted glass, not blurred. */
+    background-image: linear-gradient(to bottom,
+        rgba(255, 255, 255, 0.14), rgba(255, 255, 255, 0.04));
+    background-color: rgba(20, 28, 44, 0.55);
+    color: #e8eef5;
+    border: 1px solid rgba(255, 255, 255, 0.20);
     box-shadow:
-        0 8px 40px rgba(0, 0, 0, 0.18),
-        0 2px 8px  rgba(0, 0, 0, 0.10);
+        inset 0 1px 0 rgba(255, 255, 255, 0.22),
+        0 8px 32px rgba(0, 0, 0, 0.35),
+        0 2px 8px  rgba(0, 0, 0, 0.20);
     padding: 0 10px;
 }
 .budgie-panel .budgie-applet-button,
 .budgie-panel button.flat {
-    border-radius: 14px;
+    border-radius: 0;
     background: transparent;
+    color: #e8eef5;
     transition: background-color 220ms cubic-bezier(0.5, 0, 0.75, 0); /* fade out */
 }
 .budgie-panel .budgie-applet-button:hover,
 .budgie-panel button.flat:hover {
-    background-color: rgba(0, 0, 0, 0.06);
+    background-color: rgba(255, 255, 255, 0.12);
     transition: background-color 150ms cubic-bezier(0.22, 1, 0.36, 1); /* settle in */
 }
 .budgie-panel .budgie-applet-button:active,
 .budgie-panel button.flat:active {
-    background-color: rgba(0, 153, 204, 0.18);
+    background-color: rgba(0, 153, 204, 0.35);
     transition: background-color 90ms cubic-bezier(0.22, 1, 0.36, 1);
 }
 .budgie-panel .launcher:checked,
@@ -5522,7 +5538,7 @@ NEMODESKTOP
 
 cat > "${SKEL}/.config/gtk-3.0/settings.ini" << 'GTK3SKEL'
 [Settings]
-gtk-theme-name=Cutefish-dark
+gtk-theme-name=Adwaita-dark
 gtk-icon-theme-name=Numix-Circle
 gtk-font-name=Noto Sans 11
 gtk-cursor-theme-size=24
@@ -5553,9 +5569,9 @@ cat > /usr/local/bin/kibaos-first-login << 'FIRSTLOGIN'
 STAMP="${HOME}/.config/.kibaos-configured"
 [ -f "${STAMP}" ] && exit 0
 
-gsettings set org.gnome.desktop.interface gtk-theme               'Cutefish-dark'
+gsettings set org.gnome.desktop.interface gtk-theme               'Adwaita-dark'
 gsettings set org.gnome.desktop.interface icon-theme              'Numix-Circle'
-gsettings set org.gnome.desktop.interface cursor-theme            'Cutefish-cursors'
+gsettings set org.gnome.desktop.interface cursor-theme            'Adwaita'
 gsettings set org.gnome.desktop.interface cursor-size             24
 gsettings set org.gnome.desktop.interface font-name               'Noto Sans 11'
 gsettings set org.gnome.desktop.interface document-font-name      'Noto Sans 11'
@@ -5650,7 +5666,7 @@ PANEL_PATH="${PANEL_BASE}{${PANEL_UUID}}/"
 
 gsettings set "${PANEL_INSTANCE_SCHEMA}:${PANEL_PATH}" location bottom
 gsettings set "${PANEL_INSTANCE_SCHEMA}:${PANEL_PATH}" size 42
-gsettings set "${PANEL_INSTANCE_SCHEMA}:${PANEL_PATH}" transparency always
+gsettings set "${PANEL_INSTANCE_SCHEMA}:${PANEL_PATH}" transparency none
 gsettings set "${PANEL_INSTANCE_SCHEMA}:${PANEL_PATH}" enable-shadow true
 
 # Budgie's icon-tasklist applet will PERMANENTLY crash the session on
@@ -5726,32 +5742,15 @@ fi
 PANELGUARD
 chmod +x /usr/local/bin/kibaos-panel-guard
 
-# ── Cutefish themes + Flathub apps: install into the image at BUILD TIME ──
-# These are system-wide so every account gets them immediately; nothing is
-# fetched or installed by a first-login/autostart helper.
-set -e
-THEME_TMP="$(mktemp -d /tmp/kibaos-cutefish.XXXXXX)"
-if git clone --depth 1 https://github.com/cutefishos/gtk-themes.git "${THEME_TMP}/gtk-themes"; then
-  find "${THEME_TMP}/gtk-themes" -mindepth 1 -maxdepth 1 -type d ! -name .git \
-    -exec cp -a {} /usr/share/themes/ \;
-  echo "=== Cutefish GTK themes installed system-wide ==="
-else
-  echo "!! Cutefish GTK theme download failed; continuing build" >&2
-fi
-if git clone --depth 1 https://github.com/cutefishos/cursor-themes.git "${THEME_TMP}/cursor-themes"; then
-  find "${THEME_TMP}/cursor-themes" -mindepth 1 -maxdepth 1 -type d ! -name .git \
-    -exec cp -a {} /usr/share/icons/ \;
-  echo "=== Cutefish cursor themes installed system-wide ==="
-else
-  echo "!! Cutefish cursor theme download failed; continuing build" >&2
-fi
-rm -rf "${THEME_TMP}"
-
-# Flathub apps are installed system-wide in the image for all user accounts.
-flatpak remote-add --system --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
-flatpak install --system --noninteractive -y flathub net.cozic.joplin_desktop
-
-echo "=== KibaOS visual assets and Joplin installed at build time ==="
+cat > "${SKEL}/.config/autostart/kibaos-configure.desktop" << 'AUTOCFG'
+[Desktop Entry]
+Type=Application
+Name=KibaOS First Login Setup
+Exec=/usr/local/bin/kibaos-first-login
+Hidden=false
+NoDisplay=true
+X-GNOME-Autostart-enabled=true
+AUTOCFG
 
 # No Hidden/marker-file gate here on purpose -- unlike kibaos-configure.desktop
 # above, this one is meant to run every single login (see the comment on
@@ -6581,6 +6580,170 @@ chmod 750 /home/liveuser
 # WELCOME APP - Install KibaOS welcome application
 mkdir -p /usr/local/bin
 mkdir -p /usr/share/kibaos-welcome
+
+# ── Joplin (laurent22/joplin) ──────────────────────────────────────────────
+# Not in Arch's repos (AUR-only), and this path doesn't build AUR packages,
+# so grab the official AppImage from the latest GitHub release and extract it
+# (--appimage-extract needs no FUSE) into /opt/joplin. Electron's setuid
+# sandbox helper can't be set up from an extracted tree, hence --no-sandbox in
+# the launcher. Subshell + `||` so a GitHub/API hiccup can't fail the ISO build.
+(
+  set -e
+  # latest tag via the /releases/latest redirect -- NOT api.github.com, whose
+  # unauthenticated rate limit 403s on shared CI runners
+  JOPLIN_TAG=$(curl -fsSIL -o /dev/null -w '%{url_effective}' https://github.com/laurent22/joplin/releases/latest)
+  JOPLIN_TAG="${JOPLIN_TAG##*/}"
+  JOPLIN_URL="https://github.com/laurent22/joplin/releases/download/${JOPLIN_TAG}/Joplin-${JOPLIN_TAG#v}.AppImage"
+  [ -n "${JOPLIN_URL}" ]
+  JOPLIN_TMP="/tmp/joplin-appimage"
+  rm -rf "${JOPLIN_TMP}" && mkdir -p "${JOPLIN_TMP}" && cd "${JOPLIN_TMP}"
+  curl -fL --retry 3 -o Joplin.AppImage "${JOPLIN_URL}"
+  chmod +x Joplin.AppImage
+  ./Joplin.AppImage --appimage-extract >/dev/null
+  rm -rf /opt/joplin && mv squashfs-root /opt/joplin
+  chmod -R a+rX /opt/joplin
+  for _sz in 512 256 128 64 48; do
+    _ic="/opt/joplin/usr/share/icons/hicolor/${_sz}x${_sz}/apps/joplin.png"
+    [ -f "${_ic}" ] && install -Dm644 "${_ic}" "/usr/share/icons/hicolor/${_sz}x${_sz}/apps/joplin.png"
+  done
+  cat > /usr/bin/joplin-desktop << 'JOPLINLAUNCH'
+#!/bin/sh
+exec /opt/joplin/AppRun --no-sandbox "$@"
+JOPLINLAUNCH
+  chmod 755 /usr/bin/joplin-desktop
+  cat > /usr/share/applications/joplin.desktop << 'JOPLINDESKTOP'
+[Desktop Entry]
+Type=Application
+Name=Joplin
+Comment=Note-taking and to-do application with synchronisation
+Exec=joplin-desktop %U
+Icon=joplin
+Terminal=false
+Categories=Office;Utility;
+StartupWMClass=Joplin
+JOPLINDESKTOP
+  rm -rf "${JOPLIN_TMP}"
+) && echo "=== Joplin installed ===" \
+  || echo "!! Joplin install failed -- continuing without it" >&2
+
+# ── Kando (kando-menu/kando) — cross-platform pie menu ─────────────────────
+# Same approach as Joplin: official x86_64 AppImage, extracted (no FUSE),
+# launched with --no-sandbox. Autostarts in the tray so the menu hotkey works
+# right after login. Caveat: on Wayland Kando's global-hotkey / pointer
+# integration is per-compositor (KDE, GNOME, Hyprland, Sway-style); labwc may
+# not support triggering it -- X11 sessions are the safe path.
+(
+  set -e
+  KANDO_TAG=$(curl -fsSIL -o /dev/null -w '%{url_effective}' https://github.com/kando-menu/kando/releases/latest)
+  KANDO_TAG="${KANDO_TAG##*/}"
+  KANDO_URL="https://github.com/kando-menu/kando/releases/download/${KANDO_TAG}/Kando-${KANDO_TAG#v}-x86_64.AppImage"
+  KANDO_TMP="/tmp/kando-appimage"
+  rm -rf "${KANDO_TMP}" && mkdir -p "${KANDO_TMP}" && cd "${KANDO_TMP}"
+  curl -fL --retry 3 -o Kando.AppImage "${KANDO_URL}"
+  chmod +x Kando.AppImage
+  ./Kando.AppImage --appimage-extract >/dev/null
+  rm -rf /opt/kando && mv squashfs-root /opt/kando
+  chmod -R a+rX /opt/kando
+  for _sz in 512 256 128 64 48; do
+    _ic="/opt/kando/usr/share/icons/hicolor/${_sz}x${_sz}/apps/kando.png"
+    [ -f "${_ic}" ] && install -Dm644 "${_ic}" "/usr/share/icons/hicolor/${_sz}x${_sz}/apps/kando.png"
+  done
+  cat > /usr/bin/kando << 'KANDOLAUNCH'
+#!/bin/sh
+exec /opt/kando/AppRun --no-sandbox "$@"
+KANDOLAUNCH
+  chmod 755 /usr/bin/kando
+  cat > /usr/share/applications/kando.desktop << 'KANDODESKTOP'
+[Desktop Entry]
+Type=Application
+Name=Kando
+Comment=The Cross-Platform Pie Menu
+Exec=kando %U
+Icon=kando
+Terminal=false
+Categories=Utility;
+StartupWMClass=Kando
+KANDODESKTOP
+  mkdir -p /etc/xdg/autostart
+  cp /usr/share/applications/kando.desktop /etc/xdg/autostart/kando.desktop
+  rm -rf "${KANDO_TMP}"
+) && echo "=== Kando installed ===" \
+  || echo "!! Kando install failed -- continuing without it" >&2
+
+# ── VibePanel (prankstr/vibepanel) ─────────────────────────────────────────
+# GTK4 Wayland panel (quick settings, tray, system stats, OSD, notification
+# center). Official prebuilt x86_64 binary from the GitHub release, checked
+# against the published .sha256. Autostarts as a TOP bar next to the bottom
+# Budgie panel. Because it ships its own notification daemon + OSD (which
+# would fight Raven/budgie-daemon), the bundled config leaves out the
+# "notifications" widget and turns the OSD off, and it also leaves out the
+# workspaces/window_title/media widgets: VibePanel's compositor backends are
+# Hyprland/Niri/Sway/Mango only, so there's nothing for them to talk to on
+# labwc. A first-run wrapper copies the config into ~/.config/vibepanel so
+# every user (including the live session) gets it; edit that file to change it.
+(
+  set -e
+  VP_TAG=$(curl -fsSIL -o /dev/null -w '%{url_effective}' https://github.com/prankstr/vibepanel/releases/latest)
+  VP_TAG="${VP_TAG##*/}"
+  VP_BASE="https://github.com/prankstr/vibepanel/releases/download/${VP_TAG}"
+  VP_TMP="/tmp/vibepanel-dl"
+  rm -rf "${VP_TMP}" && mkdir -p "${VP_TMP}" && cd "${VP_TMP}"
+  curl -fL --retry 3 -o vibepanel "${VP_BASE}/vibepanel-x86_64-unknown-linux-gnu"
+  curl -fL --retry 3 -o vibepanel.sha256 "${VP_BASE}/vibepanel-x86_64-unknown-linux-gnu.sha256"
+  # .sha256 is "<hash>  <original filename>"; compare just the hash
+  [ "$(awk '{print $1}' vibepanel.sha256)" = "$(sha256sum vibepanel | awk '{print $1}')" ]
+  install -Dm755 vibepanel /usr/bin/vibepanel
+  mkdir -p /usr/share/kibaos
+  cat > /usr/share/kibaos/vibepanel-config.toml << 'VPCONFIG'
+# KibaOS default VibePanel config -- top bar alongside the Budgie bottom panel.
+[bar]
+position = "top"
+size = 32
+border_radius = 0
+background_opacity = 0.55
+
+[widgets]
+left = ["cpu"]
+right = ["tray", "quick_settings", "battery"]
+border_radius = 0
+background_opacity = 0.0
+
+[osd]
+enabled = false
+VPCONFIG
+  cat > /usr/bin/vibepanel-session << 'VPWRAP'
+#!/bin/sh
+CFG="${XDG_CONFIG_HOME:-$HOME/.config}/vibepanel/config.toml"
+if [ ! -f "$CFG" ]; then
+  mkdir -p "$(dirname "$CFG")"
+  cp /usr/share/kibaos/vibepanel-config.toml "$CFG"
+fi
+exec /usr/bin/vibepanel "$@"
+VPWRAP
+  chmod 755 /usr/bin/vibepanel-session
+  cat > /usr/share/applications/vibepanel.desktop << 'VPDESKTOP'
+[Desktop Entry]
+Type=Application
+Name=VibePanel
+Comment=Top panel with quick settings
+Exec=vibepanel-session
+Icon=preferences-system
+Terminal=false
+Categories=Utility;Settings;
+NoDisplay=true
+VPDESKTOP
+  mkdir -p /etc/xdg/autostart
+  cat > /etc/xdg/autostart/vibepanel.desktop << 'VPAUTO'
+[Desktop Entry]
+Type=Application
+Name=VibePanel
+Exec=vibepanel-session
+OnlyShowIn=Budgie;GNOME;
+X-GNOME-Autostart-Delay=2
+VPAUTO
+  rm -rf "${VP_TMP}"
+) && echo "=== VibePanel installed ===" \
+  || echo "!! VibePanel install failed -- continuing without it" >&2
 
 # Update GTK_THEME in environment to use KibaOS
 sed -i 's/GTK_THEME=Adwaita-dark/GTK_THEME=KibaOS/' /etc/environment
