@@ -2601,6 +2601,13 @@ budgie-session
 # Previews, Quickchar, etc). In Arch's [extra] repo -- Raven itself is part
 # of budgie-desktop, nothing separate to install for it.
 budgie-extras
+# KibaOS desktop apps (official Arch packages)
+kooha
+malcontent
+file-roller
+gnome-photos
+haruna
+# Joplin is installed from Flathub during first-login setup (not an official Arch package).
 # Budgie Welcome (Ubuntu Budgie's greeter app, installed from source below)
 # is a Python + WebKit GTK app; sassc compiles its stylesheet
 webkit2gtk-4.1
@@ -5515,7 +5522,7 @@ NEMODESKTOP
 
 cat > "${SKEL}/.config/gtk-3.0/settings.ini" << 'GTK3SKEL'
 [Settings]
-gtk-theme-name=Adwaita-dark
+gtk-theme-name=Cutefish-dark
 gtk-icon-theme-name=Numix-Circle
 gtk-font-name=Noto Sans 11
 gtk-cursor-theme-size=24
@@ -5546,9 +5553,9 @@ cat > /usr/local/bin/kibaos-first-login << 'FIRSTLOGIN'
 STAMP="${HOME}/.config/.kibaos-configured"
 [ -f "${STAMP}" ] && exit 0
 
-gsettings set org.gnome.desktop.interface gtk-theme               'Adwaita-dark'
+gsettings set org.gnome.desktop.interface gtk-theme               'Cutefish-dark'
 gsettings set org.gnome.desktop.interface icon-theme              'Numix-Circle'
-gsettings set org.gnome.desktop.interface cursor-theme            'Adwaita'
+gsettings set org.gnome.desktop.interface cursor-theme            'Cutefish-cursors'
 gsettings set org.gnome.desktop.interface cursor-size             24
 gsettings set org.gnome.desktop.interface font-name               'Noto Sans 11'
 gsettings set org.gnome.desktop.interface document-font-name      'Noto Sans 11'
@@ -5643,7 +5650,7 @@ PANEL_PATH="${PANEL_BASE}{${PANEL_UUID}}/"
 
 gsettings set "${PANEL_INSTANCE_SCHEMA}:${PANEL_PATH}" location bottom
 gsettings set "${PANEL_INSTANCE_SCHEMA}:${PANEL_PATH}" size 42
-gsettings set "${PANEL_INSTANCE_SCHEMA}:${PANEL_PATH}" transparency none
+gsettings set "${PANEL_INSTANCE_SCHEMA}:${PANEL_PATH}" transparency always
 gsettings set "${PANEL_INSTANCE_SCHEMA}:${PANEL_PATH}" enable-shadow true
 
 # Budgie's icon-tasklist applet will PERMANENTLY crash the session on
@@ -5719,15 +5726,32 @@ fi
 PANELGUARD
 chmod +x /usr/local/bin/kibaos-panel-guard
 
-cat > "${SKEL}/.config/autostart/kibaos-configure.desktop" << 'AUTOCFG'
-[Desktop Entry]
-Type=Application
-Name=KibaOS First Login Setup
-Exec=/usr/local/bin/kibaos-first-login
-Hidden=false
-NoDisplay=true
-X-GNOME-Autostart-enabled=true
-AUTOCFG
+# ── Cutefish themes + Flathub apps: install into the image at BUILD TIME ──
+# These are system-wide so every account gets them immediately; nothing is
+# fetched or installed by a first-login/autostart helper.
+set -e
+THEME_TMP="$(mktemp -d /tmp/kibaos-cutefish.XXXXXX)"
+if git clone --depth 1 https://github.com/cutefishos/gtk-themes.git "${THEME_TMP}/gtk-themes"; then
+  find "${THEME_TMP}/gtk-themes" -mindepth 1 -maxdepth 1 -type d ! -name .git \
+    -exec cp -a {} /usr/share/themes/ \;
+  echo "=== Cutefish GTK themes installed system-wide ==="
+else
+  echo "!! Cutefish GTK theme download failed; continuing build" >&2
+fi
+if git clone --depth 1 https://github.com/cutefishos/cursor-themes.git "${THEME_TMP}/cursor-themes"; then
+  find "${THEME_TMP}/cursor-themes" -mindepth 1 -maxdepth 1 -type d ! -name .git \
+    -exec cp -a {} /usr/share/icons/ \;
+  echo "=== Cutefish cursor themes installed system-wide ==="
+else
+  echo "!! Cutefish cursor theme download failed; continuing build" >&2
+fi
+rm -rf "${THEME_TMP}"
+
+# Flathub apps are installed system-wide in the image for all user accounts.
+flatpak remote-add --system --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
+flatpak install --system --noninteractive -y flathub net.cozic.joplin_desktop
+
+echo "=== KibaOS visual assets and Joplin installed at build time ==="
 
 # No Hidden/marker-file gate here on purpose -- unlike kibaos-configure.desktop
 # above, this one is meant to run every single login (see the comment on
