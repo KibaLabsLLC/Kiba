@@ -2055,6 +2055,7 @@ lib32-vulkan-icd-loader
 pkg-config
 gdm
 budgie-desktop
+budgie-desktop-view
 budgie-session
 budgie-extras
 webkit2gtk-4.1
@@ -2257,7 +2258,7 @@ fi
 PACMAN_CONF="${PROFILE}/pacman.conf"
 if [ -f "${PACMAN_CONF}" ]; then
   grep -q 'NoExtract' "${PACMAN_CONF}" || \
-    sed -i '/^\[options\]/a NoExtract  = usr/share/man/* usr/share/info/* usr/share/doc/*' \
+    sed -i '/^\[options\]/a NoExtract  = usr/share/man/* usr/share/info/* usr/share/doc/*\nNoExtract  = usr/share/locale/* !usr/share/locale/en_US/* !usr/share/locale/en_GB/* !usr/share/locale/locale.alias' \
     "${PACMAN_CONF}"
 fi
 
@@ -3821,33 +3822,6 @@ Hidden=true
 NOLABWCBRIDGE
 rm -rf "${SKEL}/.config/budgie-desktop/labwc" 2>/dev/null || true
 
-mkdir -p /etc/xdg/labwc
-cat > /etc/xdg/labwc/rc.xml << 'LABWCRC'
-<?xml version="1.0"?>
-<labwc_config>
-  <windowRules>
-    <windowRule identifier="*nemo*desktop*">
-      <skipTaskbar>yes</skipTaskbar>
-      <skipWindowSwitcher>yes</skipWindowSwitcher>
-      <fixedPosition>yes</fixedPosition>
-      <ignoreFocusRequest>yes</ignoreFocusRequest>
-      <action name="MoveTo" x="0" y="0" />
-      <action name="ToggleAlwaysOnBottom" />
-    </windowRule>
-    <windowRule title="x-nemo-desktop*">
-      <skipTaskbar>yes</skipTaskbar>
-      <skipWindowSwitcher>yes</skipWindowSwitcher>
-      <fixedPosition>yes</fixedPosition>
-      <ignoreFocusRequest>yes</ignoreFocusRequest>
-      <action name="MoveTo" x="0" y="0" />
-      <action name="ToggleAlwaysOnBottom" />
-    </windowRule>
-  </windowRules>
-</labwc_config>
-LABWCRC
-mkdir -p "${SKEL}/.config/labwc"
-cp /etc/xdg/labwc/rc.xml "${SKEL}/.config/labwc/rc.xml"
-
 mkdir -p /etc/gdm
 cat > /etc/gdm/custom.conf << 'GDMCONF'
 [daemon]
@@ -4236,14 +4210,62 @@ while IFS= read -r line; do
   esac
 done < "${MANIFEST}"
 
-if ${NEEDS_DISPLAY_RESTART} || ${NEEDS_COMPOSITOR_RESTART}; then
+_active_user_info() {
+  loginctl list-sessions --no-legend 2>/dev/null | while read -r _sid _uid _user _rest; do
+    [ "${_user}" = "gdm" ] && continue
+    [ "$(loginctl show-session "${_sid}" -p Class --value 2>/dev/null)" = "user" ] || continue
+    [ "$(loginctl show-session "${_sid}" -p Active --value 2>/dev/null)" = "yes" ] || continue
+    echo "${_uid} ${_user}"
+    break
+  done || true
+}
+as_desktop_user() {
+  local uid="" user="" sock=""
+  read -r uid user <<< "$(_active_user_info)" || true
+  [ -n "${uid}" ] || return 1
+  sock=$(ls "/run/user/${uid}"/wayland-* 2>/dev/null | grep -v '\.lock$' | head -n1 || true)
+  runuser -u "${user}" -- env \
+    XDG_RUNTIME_DIR="/run/user/${uid}" \
+    DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/${uid}/bus" \
+    WAYLAND_DISPLAY="$(basename "${sock:-wayland-0}")" \
+    GDK_BACKEND=wayland \
+    "$@"
+}
+ui_updating() {
+  as_desktop_user zenity --info --no-wrap --timeout=20 \
+    --title="KibaOS is updating" \
+    --text=$'<b>KibaOS is installing a small update.</b>\n\nYou can keep working \xe2\x80\x94 this won\'t interrupt anything.\nWe\'ll only ask you to restart if it\'s really needed.' \
+    >/dev/null 2>&1 &
+  return 0
+}
+ui_notify() {
+  as_desktop_user notify-send -a "KibaOS" -i software-update-available "$1" "$2" >/dev/null 2>&1 || true
+}
+ui_ask_restart() {
+  as_desktop_user zenity --question --no-wrap --timeout=300 \
+    --title="One quick restart needed" \
+    --ok-label="Restart now" --cancel-label="Later" \
+    --text=$'<b>This update needs the screen to restart to finish.</b>\n\nIt only takes a few seconds, but open apps will close,\nso please save your work first.\n\nChoose \xe2\x80\x9cLater\xe2\x80\x9d and nothing changes \xe2\x80\x94 the update will\nfinish by itself the next time you sign in.' \
+    >/dev/null 2>&1
+}
+do_session_restart() {
   fb_freeze
-fi
+  if ${NEEDS_COMPOSITOR_RESTART}; then
+    restart_compositor
+  fi
+  if ${NEEDS_DISPLAY_RESTART}; then
+    restart_display_manager
+  fi
+  fb_unfreeze
+}
+
+ui_updating || true
 
 if ! apply_patch; then
   log "Patch application failed. Initiating rollback."
   rollback_patch
   fb_unfreeze
+  ui_notify "KibaOS update couldn't be installed" "Nothing was changed — your system is exactly as it was. We'll try again later."
   exit 1
 fi
 
@@ -4251,33 +4273,29 @@ if ! run_post_hooks; then
   log "Post-patch hooks failed. Initiating rollback."
   rollback_patch
   fb_unfreeze
+  ui_notify "KibaOS update couldn't be installed" "Nothing was changed — your system is exactly as it was. We'll try again later."
   exit 1
 fi
 
 echo "${LATEST}" > "${PATCH_LEVEL_FILE}"
 
-_active_user_session() {
-  loginctl list-sessions --no-legend 2>/dev/null | while read -r _sid _uid _user _rest; do
-    [ "${_user}" = "gdm" ] && continue
-    [ "$(loginctl show-session "${_sid}" -p Class --value 2>/dev/null)" = "user" ] && \
-    [ "$(loginctl show-session "${_sid}" -p Active --value 2>/dev/null)" = "yes" ] && { echo yes; break; }
-  done
-}
-if [ -n "$(_active_user_session)" ]; then
-  log "User session is active -- deferring session restart until next login/boot."
-  mkdir -p "${OTA_WORKDIR}"
-  touch "${OTA_WORKDIR}/restart-deferred"
-else
-  if ${NEEDS_COMPOSITOR_RESTART}; then
-    restart_compositor
-  fi
-  if ${NEEDS_DISPLAY_RESTART}; then
-    restart_display_manager
-  fi
-fi
-
 if ${NEEDS_DISPLAY_RESTART} || ${NEEDS_COMPOSITOR_RESTART}; then
-  fb_unfreeze
+  if [ -n "$(_active_user_info)" ]; then
+    if ui_ask_restart; then
+      log "User chose to restart now."
+      do_session_restart
+    else
+      log "User chose Later (or didn't answer) -- deferring session restart."
+      mkdir -p "${OTA_WORKDIR}"
+      touch "${OTA_WORKDIR}/restart-deferred"
+      ui_notify "KibaOS update installed" "It'll finish by itself the next time you sign in. Nothing else to do."
+    fi
+  else
+    log "Nobody is signed in -- restarting the session now."
+    do_session_restart
+  fi
+else
+  ui_notify "KibaOS is up to date" "The update finished. Nothing else to do."
 fi
 
 log "Successfully updated to patch level ${LATEST}."
@@ -4377,15 +4395,16 @@ mkdir -p \
   "${SKEL}/.config/autostart" \
   "${SKEL}/.config/fastfetch"
 
-cat > "${SKEL}/.config/autostart/nemo-desktop.desktop" << 'NEMODESKTOP'
+cat > "${SKEL}/.config/autostart/org.buddiesofbudgie.budgie-desktop-view-autostart.desktop" << 'DESKTOPVIEW'
 [Desktop Entry]
 Type=Application
-Name=Nemo Desktop
-Exec=nemo-desktop
+Name=Budgie Desktop View
+Exec=org.buddiesofbudgie.budgie-desktop-view
 Hidden=false
 NoDisplay=true
 X-GNOME-Autostart-enabled=true
-NEMODESKTOP
+X-GNOME-AutoRestart=true
+DESKTOPVIEW
 
 cat > "${SKEL}/.config/gtk-3.0/settings.ini" << 'GTK3SKEL'
 [Settings]
@@ -4445,8 +4464,6 @@ gsettings set org.gnome.desktop.peripherals.touchpad two-finger-scrolling-enable
 gsettings set org.gnome.desktop.peripherals.mouse    natural-scroll               false
 gsettings set org.gnome.desktop.peripherals.mouse    accel-profile                'adaptive'
 
-gsettings set org.nemo.desktop show-desktop-icons              true
-gsettings set org.nemo.desktop ignored-desktop-handlers        "['budgie-helper']"
 gsettings set org.nemo.preferences show-hidden-files           false
 gsettings set org.nemo.preferences default-folder-viewer       'icon-view'
 gsettings set org.nemo.icon-view default-zoom-level            'standard'
@@ -5931,6 +5948,9 @@ find /usr/lib/firmware -mindepth 1 -maxdepth 1 \
   ! -name 'rtlwifi' ! -name 'rtw88'    ! -name 'rtw89'   \
   ! -name 'sof'     ! -name 'sof-tplg' ! -name 'intel'   \
   -exec rm -rf {} + 2>/dev/null || true
+find /usr/share/locale -mindepth 1 -maxdepth 1 \
+  ! -name 'en_US' ! -name 'en_GB' ! -name 'locale.alias' \
+  -exec rm -rf {} + 2>/dev/null || true
 find /usr -type d -name '__pycache__' -exec rm -rf {} + 2>/dev/null || true
 find /usr -name '*.pyc' -delete 2>/dev/null || true
 find /usr/lib -name '*.a' -delete 2>/dev/null || true
@@ -5940,8 +5960,6 @@ rm -rf /var/lib/pacman/sync/* /tmp/* /var/tmp/* 2>/dev/null || true
 
 chown -R 1000:1000 /home/liveuser
 
-mkdir -p /home/liveuser/.config/labwc
-cp /etc/xdg/labwc/rc.xml /home/liveuser/.config/labwc/rc.xml
 mkdir -p /home/liveuser/.config/autostart
 cat > /home/liveuser/.config/autostart/org.buddiesofbudgie.labwc-bridge.desktop << 'NOLABWCBRIDGE'
 [Desktop Entry]
