@@ -2055,7 +2055,8 @@ lib32-vulkan-icd-loader
 pkg-config
 gdm
 budgie-desktop
-budgie-desktop-view
+pcmanfm-qt
+qt6-wayland
 budgie-session
 budgie-extras
 webkit2gtk-4.1
@@ -4397,11 +4398,25 @@ mkdir -p \
   "${SKEL}/.config/autostart" \
   "${SKEL}/.config/fastfetch"
 
-cat > "${SKEL}/.config/autostart/org.buddiesofbudgie.budgie-desktop-view-autostart.desktop" << 'DESKTOPVIEW'
+# Desktop icons: pcmanfm-qt (layer-shell). It also paints the desktop
+# background, so it sets the wallpaper itself via its CLI (valid modes:
+# color|stretch|fit|center|tile) instead of relying on the old
+# budgie-desktop-view path.
+cat > /usr/local/bin/kibaos-desktop-icons << 'DESKTOPICONSWRAP'
+#!/bin/sh
+pcmanfm-qt --desktop &
+PID=$!
+sleep 2
+pcmanfm-qt --wallpaper-mode=stretch -w /usr/share/kibaos/wallpaper.jpg
+wait "$PID"
+DESKTOPICONSWRAP
+chmod +x /usr/local/bin/kibaos-desktop-icons
+
+cat > "${SKEL}/.config/autostart/pcmanfm-qt-desktop.desktop" << 'DESKTOPVIEW'
 [Desktop Entry]
 Type=Application
-Name=Budgie Desktop View
-Exec=org.buddiesofbudgie.budgie-desktop-view
+Name=PCManFM-Qt Desktop
+Exec=/usr/local/bin/kibaos-desktop-icons
 Hidden=false
 NoDisplay=true
 X-GNOME-Autostart-enabled=true
