@@ -1,14 +1,6 @@
 #!/bin/bash
 set -ex
 
-# sniffing out what target we're building for today :3
-# the ARM branch (archiso-on-ALARM, boots a real PC-shaped ISO) is gone --
-# replaced outright by --mobile, which doesn't build an ISO at all. Mobile
-# targets a Halium GSI phone: no archiso, no GRUB/systemd-boot, no OOBE
-# installer -- just a pacstrap'd rootfs tarball that gets bundled with a
-# halium-boot.img + the Halium GSI system.img and flashed/sideloaded onto
-# the phone's existing Android partitions. Everything downstream still
-# just checks $KIBA_ARCH.
 KIBA_ARCH="x86_64"
 for _a in "$@"; do
   case "${_a}" in
@@ -19,20 +11,8 @@ done
 export KIBA_ARCH
 echo "=== KibaOS build target: ${KIBA_ARCH} ==="
 
-# mobile takes a completely separate, much shorter code path (see
-# build_kibaos_mobile() below) -- it shares the parallel-downloads tweak
-# and pacman bootstrap right below this block, but skips archiso,
-# profiledef.sh, packages.x86_64/customize_airootfs.sh (that whole heredoc
-# is the desktop OOBE installer + disk-partitioning/GRUB-NVRAM backend,
-# none of which applies to a phone that already has Android partitions
-# and boots through halium-boot.img instead of GRUB/systemd-boot) and
-# mkarchiso entirely.
-
-# ── speed hack: crank up parallel downloads so pacman isn't crawling ───────
 sed -i 's/^#ParallelDownloads = 5/ParallelDownloads = 10/' /etc/pacman.conf
 
-# ── gotta pre-make the alpm user inside airootfs or pacman throws a fit
-#    when it tries to run inside the chroot later ──────────────────────────
 grep -q '^alpm:' "${AIROOTFS}/etc/passwd" 2>/dev/null || \
   echo 'alpm:x:951:951::/var/cache/pacman/pkg:/usr/bin/nologin' >> "${AIROOTFS}/etc/passwd"
 grep -q '^alpm:' "${AIROOTFS}/etc/group" 2>/dev/null || \
@@ -42,26 +22,11 @@ grep -q '^alpm:' "${AIROOTFS}/etc/shadow" 2>/dev/null || \
 mkdir -p "${AIROOTFS}/var/cache/pacman/pkg"
 chmod 755 "${AIROOTFS}/var/cache/pacman" "${AIROOTFS}/var/cache/pacman/pkg"
 
-# ── stuff the build container itself needs before we can do anything ──────
 pacman-key --init
 pacman-key --populate archlinux
 pacman -Syy --noconfirm
 pacman -Su  --noconfirm
 if [ "${KIBA_ARCH}" = "mobile" ]; then
-  # mobile doesn't touch archiso/GRUB/squashfs at all -- just needs
-  # pacstrap (arch-install-scripts) plus basic fetch/package tooling.
-  # jq is here for parsing the GitHub API response when resolving the
-  # latest Magisk release (magiskboot is pulled from it further down,
-  # for the on-device boot.img repack update-binary does at install
-  # time -- nothing Python/AOSP-tooling related runs on this build host
-  # anymore).
-  # imagemagick added here for the same reason it's on the desktop
-  # branch: the mobile rootfs now ships the same branded SDDM greeter
-  # theme desktop does (see the "shared SDDM theme" block below), which
-  # needs wallpaper.jpg/logo-256.png generated the same way -- `magick`
-  # runs on THIS build host and writes straight into ${_root}, same
-  # pattern as every other direct-write in this function (phoc.ini,
-  # oobe.css, etc.), no arch-chroot needed for image processing itself.
   pacman -S --noconfirm --needed \
     base-devel git arch-install-scripts openssl curl jq e2fsprogs zip unzip imagemagick
 else
@@ -74,44 +39,12 @@ else
     python-docutils
 fi
 
-# ══════════════════════════════════════════════════════════════════════════
-# MOBILE: KibaOS Mobile rootfs for Halium GSI phones
-# ══════════════════════════════════════════════════════════════════════════
-# Not an ISO. Halium GSI devices boot through boot.img (kernel + Halium
-# ramdisk) and the Halium GSI system.img. Following the "Halium-boot"
-# porting method, this script fetches the prebuilt, device-agnostic GSI
-# directly (no AOSP repo sync) -- but does NOT try to pre-build boot.img
-# on this build host anymore. That was tried (fetch a "certified GKI
-# kernel" and repack it here) and didn't hold up: Google doesn't publish
-# a stable download URL for those, and even where the kernel really is
-# generic, assembling a bootable image still needs the device's own
-# vendor_boot/dtb -- something a build host with no idea what phone
-# it's targeting can't supply. Instead, this ships the ingredients
-# (magiskboot + a generic Halium ramdisk) and the installer zip's
-# update-binary does the unpack/swap-ramdisk/repack itself, on the
-# phone, against that phone's own stock boot/init_boot partition --
-# see the boot-repack-tools section below and update-binary further
-# down for the actual mechanics. No per-device kernel tree, no
-# repo/breakfast/mka, and no KIBA_MOBILE_HALIUM_BOOT_IMG to hand-supply
-# either -- but also no pretending a build host can know a phone's
-# vendor_boot ahead of time. What this function otherwise produces is
-# the userspace: a pacstrap'd Arch
-# Linux ARM aarch64 rootfs
-# carrying KibaOS's mobile stack (Budgie panel/raven on phoc, ofono,
-# Calls, Chatty, squeekboard, libgestures, sddm for lock/login),
-# tarred up the same way Manjaro's libhybris/image-ci project packages
-# its own Halium rootfs for adb-sideload install onto /data alongside
-# the GSI + halium-boot.img.
 build_kibaos_mobile() {
   local _root="/w/mobile-rootfs"
   local _out="/w/out"
   rm -rf "${_root}"
   mkdir -p "${_root}" "${_out}"
 
-  # ── ALARM signing key, same reasoning as the aarch64 GPGDir seed later
-  #    in this file used to need: ALARM packages are signed by a key the
-  #    archlinux keyring doesn't ship, so pacman-key needs it seeded
-  #    before pacstrap can pull anything off an ALARM mirror. ─────────────
   pacman-key --init
   pacman-key --populate archlinux
   pacman-key --recv-keys 68B3537F39A313B3E574D06777193F152BDBE6A6 \
@@ -136,43 +69,13 @@ Include = /etc/pacman.d/mobile-mirrorlist
 [alarm]
 Include = /etc/pacman.d/mobile-mirrorlist
 PACMANCONF
-  # No [aur] section here on purpose -- ALARM doesn't host a prebuilt
-  # binary AUR repo at this mirror path (or anywhere), so it never
-  # resolved any package; it just sat there as a dead sync target every
-  # run. AUR-only packages (ofono, libhybris, gnome-calls, chatty,
-  # libgestures, wlrctl) are all built from source in the AUR loop below
-  # instead of pacstrap'd.
 
   mkdir -p "${_root}/var/lib/pacman"
 
-  # ── base + telephony + mobile shell stack ───────────────────────────────
-  # linux-aarch64/linux-firmware deliberately OMITTED -- the kernel comes
-  # from halium-boot.img, a rootfs-supplied kernel would never be used and
-  # just bloats the tarball.
-  #
-  # gnome-calls and chatty ARE real binary packages (gnome-calls ships on
-  # ALARM's own aarch64 repo; chatty -- the GNOME/Purism SMS+Matrix app --
-  # was absorbed into Arch's official [extra] a while back, at which point
-  # the AUR maintainer handed the bare "chatty" AUR name over to an
-  # unrelated Java/Gradle Twitch-chat client). Pulled here via pacstrap
-  # instead of the AUR loop below -- building "chatty" from AUR now grabs
-  # the wrong project entirely (and drags in `gradle`, which isn't even
-  # packaged for ALARM/aarch64, so that AUR build could never succeed).
-  # libgestures has no aarch64 build in AUR at all (arch=('x86_64') in its
-  # PKGBUILD) -- dropped from the AUR loop below instead of retried
-  # pointlessly every run. ofono and libhybris were
-  # previously listed in this call too, but neither actually exists as a
-  # binary package in core/extra/alarm -- both are AUR-only upstream (the
-  # [aur] entry in mobile-pacman.conf isn't a real ALARM-hosted binary
-  # repo, so it never resolved them either; pacstrap failed outright with
-  # "target not found: ofono" / "target not found: libhybris"). Moved
-  # into the AUR build loop below alongside the other AUR-only packages.
   pacstrap -C /tmp/mobile-pacman.conf -c -G "${_root}" \
     base sudo networkmanager \
      labwc-is-not-used-placeholder 2>/dev/null || true
 
-  # (real pacstrap call -- the line above is deliberately allowed to
-  # partially fail on the placeholder package name and retried clean here)
   pacstrap -C /tmp/mobile-pacman.conf -c -G "${_root}" \
     base sudo networkmanager dbus polkit \
      budgie-control-center \
@@ -183,28 +86,6 @@ PACMANCONF
     openssh git base-devel \
     ell gnome-calls chatty
 
-  # ell installed explicitly above -- it's a real ALARM [extra] binary
-  # package (unlike ofono/libhybris, which are genuinely AUR-only), and
-  # it's a build dep of the AUR ofono PKGBUILD below. Pre-installing it
-  # here means makepkg -si never has to resolve it as a missing dep at
-  # all, on top of the pacman -Syy resync added above.
-
-  # ── strip the dead [aur] entry from the TARGET root's own pacman.conf ──
-  # /tmp/mobile-pacman.conf (cleaned of its own dead [aur] section above)
-  # only governs the pacstrap calls themselves -- it's a host-side config
-  # pacstrap reads, never copied into the new root. Once inside the
-  # chroot (arch-chroot below, for makepkg -si), pacman uses the target's
-  # OWN /etc/pacman.conf instead, which comes from the pacman package's
-  # default ALARM template -- and that template ships its own legacy
-  # [aur] section (a leftover from when some ALARM configs pointed it at
-  # a real repo; it doesn't exist as a resolvable repo anymore). Left in
-  # place, every makepkg -si dependency-install below hits "database file
-  # for 'aur' does not exist" / "could not find database" and fails
-  # outright, exactly the same class of problem as the host-side one, just
-  # inside the chroot instead. Delete the [aur] stanza (header line
-  # through whatever it contains, up to the next section) rather than
-  # assuming a fixed line count, since the exact template contents aren't
-  # guaranteed across ALARM base image revisions.
   awk '
     /^\[aur\]/ { skip=1; next }
     skip && /^\[/ { skip=0 }
@@ -212,33 +93,8 @@ PACMANCONF
   ' "${_root}/etc/pacman.conf" > "${_root}/etc/pacman.conf.new" \
     && mv "${_root}/etc/pacman.conf.new" "${_root}/etc/pacman.conf"
 
-  # CheckSpace's disk-space check is unreliable inside arch-chroot -- it
-  # resolves the cache dir's mountpoint via /proc/self/mountinfo, which
-  # doesn't reflect the chroot's view correctly, so it misreports "not
-  # enough free disk space" on a runner that has plenty. Same fix already
-  # applied to the desktop ISO's chroot pacman.conf elsewhere in this
-  # script (see the other CheckSpace sed calls) -- just needed here too
-  # for the mobile rootfs's own pacman.conf, which every makepkg -si
-  # below runs against via arch-chroot.
   sed -i 's/^CheckSpace/#CheckSpace/' "${_root}/etc/pacman.conf"
 
-  # ── seed the TARGET root's own pacman keyring ───────────────────────────
-  # pacstrap was called with -G above ("avoid copying the host's pacman
-  # keyring to the target") -- so while the HOST's /etc/pacman.d/gnupg got
-  # initialized+populated+ALARM-key-signed near the top of this function,
-  # ${_root}/etc/pacman.d/gnupg was never touched at all: it's either
-  # missing or empty. Every arch-chroot pacman call from here on
-  # (the -Syy resync right below, every makepkg -si dependency install in
-  # the AUR loop, and the final sddm install) runs pacman
-  # INSIDE this chroot against that empty keyring, which is what actually
-  # produces "keyring is not writable" / "required key missing from
-  # keyring" -- and once that happens pacman can't verify (or in some
-  # cases even fetch) anything from the ALARM repo, so downstream
-  # failures like "target not found: sddm" are a symptom of
-  # this, not a real missing-package problem. Mirror the exact
-  # init/populate/recv/lsign sequence already done on the host earlier in
-  # this function, just run via arch-chroot so it lands in ${_root}'s own
-  # gnupg dir instead.
   arch-chroot "${_root}" pacman-key --init
   arch-chroot "${_root}" pacman-key --populate archlinux
   arch-chroot "${_root}" pacman-key --recv-keys \
@@ -247,24 +103,8 @@ PACMANCONF
   arch-chroot "${_root}" pacman-key --lsign-key \
     68B3537F39A313B3E574D06777193F152BDBE6A6
 
-  # Force a resync against the target's OWN (post-swap) pacman.conf --
-  # pacstrap synced core/extra/alarm under /tmp/mobile-pacman.conf above,
-  # but nothing has refreshed the sync DBs since we swapped in the
-  # target's default ALARM-template pacman.conf just above. Without this,
-  # makepkg -si's dependency resolution in the AUR loop below (e.g.
-  # ofono's `ell` build dep, which genuinely exists in ALARM's [extra])
-  # can hit "target not found: ell" against a stale/empty sync DB even
-  # though the package is real. Cheap and idempotent, so just always do it.
   arch-chroot "${_root}" pacman -Syy --noconfirm
 
-  # ── AUR: ofono, libhybris, gnome-calls (gnome-dialer), chatty,
-  #    libgestures, wlrctl ────────────────────────────────────────────────
-  # No AUR helper assumed present on a fresh ALARM rootfs -- build each
-  # manually as the alpm build user already seeded near the top of this
-  # script, inside the target rootfs via arch-chroot. wlrctl backs the
-  # nav bar's recents button below (wlr-foreign-toplevel-management
-  # listing) -- it's genuinely AUR-only, no official/ALARM package, same
-  # as the other three here.
   arch-chroot "${_root}" useradd -m -G wheel builder || true
   echo 'builder ALL=(ALL) NOPASSWD: ALL' > "${_root}/etc/sudoers.d/builder"
 
@@ -282,15 +122,6 @@ PACMANCONF
     "
   }
 
-  # ── retry wrapper: AUR's git-over-HTTPS throws transient TLS/EOF
-  #    errors under load ("SSL_read: ... unexpected eof while reading")
-  #    that have nothing to do with the package itself -- a plain
-  #    network blip, not a real build failure. Retrying the whole
-  #    clone+build a few times with a short backoff clears these without
-  #    having to hand-rerun the entire mobile build over one flaky
-  #    connection. _aur_build itself cleans up any half-cloned dir from
-  #    the previous attempt before retrying, so this is safe to call
-  #    repeatedly.
   _aur_build_retry() {
     local _pkg="$1"
     local _extra_args="${2:-}"
@@ -307,12 +138,6 @@ PACMANCONF
     return 1
   }
 
-  # ofono used to come from the plain pacstrap call above with no
-  # fallback -- i.e. the build was already designed to hard-fail if it
-  # was missing, since it's the actual telephony stack a "mobile" build
-  # exists to ship, not a cosmetic AUR extra. Preserving that: unlike the
-  # soft-fail loop below, a failure here aborts the build instead of
-  # shipping a phone image with no modem/SIM support.
   _aur_build_retry ofono || {
     echo "ERROR: ofono AUR build failed -- refusing to ship a mobile rootfs with no working telephony stack. Check the makepkg log above." >&2
     rm -f "${_root}/etc/sudoers.d/builder"
@@ -320,48 +145,18 @@ PACMANCONF
     exit 1
   }
 
-  # libhybris itself is NOT built here anymore -- it already ships inside
-  # the built image (the Halium GSI system.img carries it), so compiling
-  # libhybris-git on this build host was just redundant work with none of
-  # its output actually used by the rootfs this function produces.
-
-  # wlrctl -- genuinely AUR-only, no official/ALARM package. gnome-calls
-  # and chatty are pacstrap'd above now instead of built here (see the
-  # comment near that pacstrap call); libgestures is skipped entirely --
-  # its AUR PKGBUILD has no aarch64 build at all, so retrying it here
-  # every run would just burn ~50s on a guaranteed failure.
   for _pkg in wlrctl; do
     _aur_build_retry "${_pkg}" || echo "!! ${_pkg} AUR build failed -- check the log above, continuing" >&2
   done
   rm -f "${_root}/etc/sudoers.d/builder"
   arch-chroot "${_root}" userdel -r builder || true
 
-  # ── lock/login screen: sddm, same as the desktop build ──────────────────
-  # phosh-lockscreen was AUR-only and not actually resolvable ("target not
-  # found") -- sddm is a real official ALARM [extra] package, so this pulls
-  # straight from pacman, no AUR/makepkg step needed. It's also already
-  # what the desktop x86_64 build uses (see install_archiso's SDDM theme
-  # section and the enable/wants-symlink calls elsewhere in this script),
-  # so mobile now matches it instead of depending on a separate phone-only
-  # greeter stack. Hard fail if this isn't available -- a phone build with
-  # no lock/login screen is not an acceptable degraded state to ship
-  # silently, unlike the AUR telephony packages above which can reasonably
-  # continue without.
   if ! arch-chroot "${_root}" pacman -S --noconfirm --needed sddm; then
     echo "ERROR: sddm not available -- refusing to build a mobile rootfs with no lock/login screen. Check the ALARM [extra] repo/mirror." >&2
     exit 1
   fi
   arch-chroot "${_root}" systemctl enable sddm
 
-  # ── liveuser account ─────────────────────────────────────────────────────
-  # The dconf install right below has always written into
-  # /home/liveuser/.config/dconf assuming that account exists -- it never
-  # actually did on mobile (only the desktop ISO's own
-  # customize_airootfs.sh creates it, in AIROOTFS/etc/passwd, which this
-  # function's ${_root} is entirely separate from). Needed for real now
-  # that SDDM Autologin below points at it: autologin has to authenticate
-  # against a real target-rootfs account, not just a directory owned by
-  # uid 1000. Mirrors the exact passwd/group lines the desktop path uses.
   arch-chroot "${_root}" bash -c "
     grep -q '^liveuser:' /etc/passwd || \
       echo 'liveuser:x:1000:1000:KibaOS Live User (Password is live):/home/liveuser:/bin/bash' >> /etc/passwd
@@ -371,17 +166,6 @@ PACMANCONF
     chown 1000:1000 /home/liveuser
   "
 
-  # ── shared branded SDDM theme ────────────────────────────────────────────
-  # Same wallpaper/logo source and same Main.qml/metadata.desktop as the
-  # desktop build's SDDM theme (see install_archiso's "SDDM -- custom
-  # KibaOS frosted-glass greeter theme" section) -- kept byte-identical by
-  # hand between the two copies, since they run in genuinely different
-  # execution contexts (that one's baked into customize_airootfs.sh and
-  # runs inside a chroot at ISO-customize time; this one runs directly
-  # against ${_root} during this function, on this build host). The QML
-  # itself is screen-size-aware (see its own `isPhone` check), so the
-  # exact same file already renders touch-friendly on a phone panel and
-  # unchanged on a desktop one -- no separate mobile QML needed.
   KIBA_WALLPAPER_URL="https://raw.githubusercontent.com/KibaLabsLLC/Kiba/refs/heads/main/assets/wallpapers/F700436B-3FFC-4570-8BD2-623082C75533.png"
   KIBA_BOOT_SPLASH_URL="https://github.com/WolfTech-Innovations/Kiba/blob/main/assets/splash/splash.png?raw=true"
   mkdir -p "${_root}/usr/share/kibaos"
@@ -392,9 +176,6 @@ PACMANCONF
 
   curl -fL --retry 5 --retry-delay 3 -o /tmp/kiba-boot-splash-raw.png "${KIBA_BOOT_SPLASH_URL}" || true
   if [ -f /tmp/kiba-boot-splash-raw.png ] && file /tmp/kiba-boot-splash-raw.png | grep -qi image; then
-    # Source is already a centered square badge, no wordmark to crop out
-    # (unlike the old landscape lockup this used to assume) -- resize
-    # straight through.
     magick /tmp/kiba-boot-splash-raw.png -filter Lanczos -resize 256x256 "${_root}/usr/share/kibaos/logo-256.png"
     rm -f /tmp/kiba-boot-splash-raw.png
   else
@@ -424,8 +205,6 @@ Font=Noto Sans
 QuickVersion=6
 SDDMMETA
 
-  # Keep in sync by hand with install_archiso's copy -- see the comment
-  # block above for why these can't literally share a bash variable.
   cat > "${SDDM_THEME_DIR}/Main.qml" << 'SDDMQML'
 import QtQuick
 import QtQuick.Controls
@@ -689,19 +468,12 @@ SDDMMOBILECONF
     chmod 750 /var/lib/sddm
   "
 
-  # ── minimal branding/behavior pass (the parts of the desktop
-  #    customize_airootfs.sh that still make sense with no disk installer
-  #    or GRUB in the picture: DNS, dconf panel state, hidden launchers) ──
   install -d -m 755 -o 1000 -g 1000 "${_root}/home/liveuser/.config/dconf" 2>/dev/null || true
   cat > "${_root}/etc/resolv.conf" << 'RESOLVCONF'
 nameserver 1.1.1.1
 nameserver 1.0.0.1
 RESOLVCONF
 
-  # phoc's own config -- points it at Budgie's panel/raven as layer-shell
-  # clients instead of Phosh's shell, keeps libgestures/squeekboard as-is
-  # since both talk to whatever compositor implements layer-shell, not
-  # specifically Phosh.
   mkdir -p "${_root}/etc/phoc"
   cat > "${_root}/etc/phoc/phoc.ini" << 'PHOCINI'
 [core]
@@ -711,24 +483,6 @@ xwayland=true
 scale=2
 PHOCINI
 
-  # ══════════════════════════════════════════════════════════════════════
-  # Bottom navigation bar -- Waybar
-  # ══════════════════════════════════════════════════════════════════════
-  # Waybar over gtk-layer-shell rather than a bespoke GTK bar: it's the
-  # de-facto modern bar on wlroots-based Wayland compositors (same
-  # layer-shell protocol phoc/squeekboard already speak here), actively
-  # maintained, and themeable entirely through CSS -- so it can carry the
-  # exact same design tokens as the OOBE (oobe.css's #0071e3 accent, pill
-  # shapes) instead of introducing a second, unrelated visual language
-  # for the persistent chrome the user sees on every screen after setup.
-  #
-  # Reachable actions are necessarily best-effort here: phoc doesn't ship
-  # a swaymsg-equivalent IPC or a full foreign-toplevel switching UI like
-  # sway does, so "recents" runs wlrctl's toplevel list (wlrctl is built
-  # from AUR above) rather than a live-thumbnail switcher -- real data,
-  # just not a real switcher UI yet. Worth revisiting once phoc's own
-  # protocol support covers richer toplevel management (track
-  # https://gitlab.gnome.org/World/Phosh/phoc issues).
   mkdir -p "${_root}/etc/xdg/waybar"
   cat > "${_root}/etc/xdg/waybar/config" << 'WAYBARCONFIG'
 {
@@ -808,20 +562,6 @@ window#waybar {
 #custom-home:active { background: #0068d6; }
 WAYBARCSS
 
-  # ══════════════════════════════════════════════════════════════════════
-  # Status bar -- Android/iOS-style top bar: clock left, cellular/Wi-Fi/
-  # Bluetooth/battery right. A second, independent waybar instance rather
-  # than folding these into the nav bar above: the nav bar claims the
-  # bottom screen edge ("position": "bottom"), this one claims the top
-  # ("position": "top") -- two separate waybar processes with their own
-  # config/style pair is the normal way to run a top+bottom bar pair
-  # under wlroots (each is its own layer-shell surface; nothing about
-  # running two waybar processes conflicts, they just claim different
-  # screen edges). Same design tokens as the nav bar and oobe.css
-  # (#0071e3 accent, translucent dark chrome), same "plain Unicode
-  # glyphs, no icon font" rule the nav bar already follows -- no Nerd
-  # Font dependency for a bar that's on-screen 100% of the time.
-  # ══════════════════════════════════════════════════════════════════════
   mkdir -p "${_root}/etc/xdg/waybar"
   cat > "${_root}/etc/xdg/waybar/statusbar-config" << 'STATUSBARCONFIG'
 {
@@ -917,22 +657,8 @@ window#waybar {
 #battery.critical { color: #f87171; }
 STATUSBARCSS
 
-  # ── Cellular signal module: no built-in waybar module reads ofono, so
-  # this is a small polling script (waybar re-execs it every "interval"
-  # seconds per statusbar-config above) that queries ofono's own D-Bus
-  # API directly via gdbus (part of glib2, already a hard dependency of
-  # dbus which is pulled above -- no extra package needed) the same way
-  # check_sim() in the OOBE does, just outside a GLib main loop since
-  # this runs standalone rather than inside the Vala wizard. Emits
-  # waybar's custom-module JSON contract: {text, tooltip, class}.
-  # Deliberately fails soft everywhere -- no modem, no SIM, or a gdbus
-  # parse miss all just print {"text":""}, which waybar collapses to
-  # nothing rather than showing a broken/stale reading.
   cat > "${_root}/usr/local/bin/kibaos-mobile-cellular" << 'CELLULARSCRIPT'
 #!/bin/bash
-# KibaOS Mobile status bar -- cellular signal custom module for waybar.
-# Reads modem/signal state straight from ofono over D-Bus; see the
-# longer explanation above where this file gets written.
 set -u
 
 _empty() { echo '{"text":"","tooltip":"No SIM/modem detected","class":"none"}'; }
@@ -978,13 +704,6 @@ echo "{\"text\":\"${_bar} ${_tech_label}\",\"tooltip\":\"${_carrier}${_roam_suff
 CELLULARSCRIPT
   chmod +x "${_root}/usr/local/bin/kibaos-mobile-cellular"
 
-  # Minimal placeholder task-switcher -- lists wlr-foreign-toplevel
-  # clients via wlrctl (built above in the AUR pass). Still not a real
-  # thumbnail switcher -- phoc doesn't expose a richer IPC/foreign-
-  # toplevel-based switching surface yet -- but wlrctl toplevel list is
-  # at least real data now instead of a "not installed" stub. Kept the
-  # command-existence check anyway since the AUR build above can still
-  # fail without aborting the whole rootfs build (see the `||` there).
   cat > "${_root}/usr/local/bin/kibaos-mobile-recents" << 'RECENTSSCRIPT'
 #!/bin/bash
 if command -v wlrctl >/dev/null 2>&1; then
@@ -1011,10 +730,6 @@ Exec=waybar -c /etc/xdg/waybar/statusbar-config -s /etc/xdg/waybar/statusbar-sty
 X-GNOME-Autostart-enabled=true
 STATUSBARAUTOSTART
 
-  # bluetoothd/upowerd back the status bar's bluetooth + battery modules
-  # -- neither package enables its service by default on a fresh ALARM
-  # rootfs, so wire them up explicitly the same way the rest of this
-  # function reaches into ${_root} via arch-chroot.
   arch-chroot "${_root}" systemctl enable bluetooth upower || true
 
   cat > "${_root}/etc/xdg/autostart/kibaos-mobile-shell.desktop" << 'AUTOSTART'
@@ -1025,22 +740,6 @@ Exec=budgie-panel
 X-GNOME-Autostart-enabled=true
 AUTOSTART
 
-  # ── WinApps / Windows Workspace is a desktop-only feature ───────────────
-  # Deliberately never referenced anywhere in this function. It lives in
-  # customize_airootfs.sh (desktop/laptop ISO path) exclusively -- WinApps
-  # depends on a local Docker/libvirt Windows VM for RDP passthrough,
-  # which has no sane story on phone hardware. If a future edit of this
-  # function starts pulling in kibaos-winapps-* anything, that's a bug.
-
-  # ══════════════════════════════════════════════════════════════════════
-  # Mobile OOBE — Android-style first-boot flow (Vala/GTK4/libadwaita,
-  # same stack as the desktop OOBE installer). No disk partitioning, no
-  # GRUB/systemd-boot NVRAM step -- GSI + this rootfs are already flashed
-  # by the time this ever runs. Flow: Welcome -> Language/Region -> Wi-Fi
-  # -> SIM/carrier via ofono -> account step (mandatory) -> done. Gated
-  # by a marker file so it only ever runs once, same idea as Android's
-  # own SetupWizard.
-  # ══════════════════════════════════════════════════════════════════════
   pacstrap -C /tmp/mobile-pacman.conf -c -G "${_root}" \
     gtk4 libadwaita vala meson ninja glib2 networkmanager
 
@@ -1056,18 +755,6 @@ executable('kibaos-mobile-oobe', 'src/main.vala',
   install: true)
 MESONBUILD
 
-  # ── Mobile OOBE stylesheet ────────────────────────────────────────────
-  # Same design language as the desktop installer (oobe.css: #0071e3
-  # accent, pill buttons, step dots, easeOutQuint card-ins) carried over
-  # to a phone screen, with Material 3 shape/elevation layered on top
-  # where a touch UI actually benefits from it: bigger corner radii on
-  # touch targets (Material's "extra-large" 28px shape scale vs desktop's
-  # 18-20px), real elevation shadows on the Wi-Fi list instead of a flat
-  # bordered row (fingers need a stronger affordance than a mouse cursor
-  # does), and a top linear progress track like Android's own
-  # SetupWizard/LineageOS SetupWizard use instead of relying on step dots
-  # alone -- dots stay too, just demoted to a secondary indicator under
-  # the header the way Material stepper components use both together.
   mkdir -p "${_root}/usr/share/kibaos-mobile-oobe"
   cat > "${_root}/usr/share/kibaos-mobile-oobe/oobe.css" << 'MOBILEOOBECSS'
 /* ═══════════════════════════════════════════════════════════════════════
@@ -1901,8 +1588,6 @@ OOBEVALA
     ninja -C build install
   " || echo "!! kibaos-mobile-oobe failed to build -- check the meson/ninja log above" >&2
 
-  # first-boot autostart -- checks the marker itself (see MARKER in
-  # main.vala) so this is a no-op after the wizard's first successful run
   cat > "${_root}/etc/xdg/autostart/kibaos-mobile-oobe.desktop" << 'OOBEAUTOSTART'
 [Desktop Entry]
 Type=Application
@@ -1911,54 +1596,12 @@ Exec=kibaos-mobile-oobe
 X-GNOME-Autostart-enabled=true
 OOBEAUTOSTART
 
-  # ── Halium GSI (system.img) -- Halium-boot method ───────────────────────
-  # NOTE ON PATHS THAT USED TO BE HERE: an earlier version of this script
-  # tried a "fast" GSI path through JamiKettunen/cports (hybris branch) --
-  # ./cbuild pkg -a aarch64 user/halium-gsi-X.0 -- which turned out to
-  # produce a Chimera Linux apk/rootfs, not a system.img; wrong tool for
-  # an Arch Linux ARM/pacstrap userspace. After that, this function
-  # switched to building the GSI from source: repo init against
-  # Halium/android, breakfast the generic halium_arm64 target, mka
-  # rawsystemimage -- the "full system image" porting method. That's a
-  # ~150GB+ AOSP repo sync and a multi-hour Soong build just to reproduce
-  # a system.img that's already device-agnostic and publicly hosted --
-  # a lot of build-server time for a file this project has no reason to
-  # compile itself.
-  #
-  # What's actually appropriate here is the Halium-boot method (one of
-  # the three porting methods docs.halium.org/UBports document: full
-  # system image, Halium-boot, and standalone kernel). Since Halium 9 the
-  # GSI is a prebuilt, device-independent artifact by design -- Treble
-  # moved every device-specific bit into the vendor partition, so the
-  # Halium-boot method just fetches the GSI instead of rebuilding it, and
-  # leaves only halium-boot.img (the kernel + Halium ramdisk, genuinely
-  # per-device) to be built or supplied separately -- already handled as
-  # a manual step in README-INSTALL.md below. That's the right split for
-  # this script: it produces the device-agnostic pieces (this rootfs
-  # tarball, and now the GSI fetch), and stays out of the per-device
-  # kernel build entirely.
-  #
-  # Default source is the lolinet mirror -- this is the ubports_GSI_installer
-  # bundle at mirrors.lolinet.com/firmware/halium/GSI/, confirmed live
-  # (directory listing checked directly). NOTE: an earlier revision of this
-  # default pointed at build.lolinet.com/file/halium/GSI/halium-10.0/arm64ab/
-  # halium-generic-arm64ab-ota-latest.zip -- that path doesn't exist on
-  # lolinet at all (wrong domain AND wrong directory layout; lolinet only
-  # ever served numbered ubports_GSI_installer_vN.zip bundles under
-  # mirrors.lolinet.com/firmware/halium/GSI/), which is why it 404'd.
-  # override KIBA_MOBILE_GSI_URL to pin a specific build/mirror. Set
-  # KIBA_SKIP_GSI_FETCH=1 to skip entirely (e.g. offline CI) and fall
-  # back to the manual pointer in README-INSTALL.md.
   : "${KIBA_MOBILE_GSI_URL:=https://mirrors.lolinet.com/firmware/halium/GSI/ubports_GSI_installer_v10.zip}"
   if [ "${KIBA_SKIP_GSI_FETCH:-0}" = "1" ]; then
     echo "=== KIBA_SKIP_GSI_FETCH=1 -- skipping Halium GSI fetch (see README-INSTALL.md for a manual pointer) ==="
   else
     mkdir -p /w/halium-gsi && cd /w/halium-gsi
     if curl -fL -o gsi-fetch.zip "${KIBA_MOBILE_GSI_URL}"; then
-      # the GSI mirror ships a flashable zip (system image + installer
-      # metadata), not a bare system.img -- unzip and grab the image
-      # itself so kibaos-mobile-gsi-arm64.img is a drop-in next to the
-      # rootfs tarball.
       unzip -o gsi-fetch.zip -d extracted >/dev/null
       _gsi_img="$(find extracted -maxdepth 3 \( -iname 'system.img' -o -iname '*.img' \) 2>/dev/null | head -n1)"
       if [ -n "${_gsi_img}" ] && [ -f "${_gsi_img}" ]; then
@@ -1978,48 +1621,6 @@ OOBEAUTOSTART
     cd /w
   fi
 
-  # ── boot.img repack ingredients (generic Halium ramdisk + magiskboot) ───
-  # Earlier revisions of this tried to pre-build boot.img on the build
-  # host by fetching a "certified GKI boot image" from Google and
-  # assuming that was enough. Checked that against source.android.com and
-  # docs.ubports.com and it doesn't hold up on two counts: (1) Google
-  # doesn't publish a stable download URL for certified GKI images --
-  # they come from a repo-synced source build or a specific numbered
-  # ci.android.com artifact, not a fetchable zip per branch; and (2) even
-  # where the GKI kernel itself genuinely is generic, turning it into a
-  # bootable image still needs the device's own vendor_boot (dtb, base
-  # address, pagesize, cmdline) -- and on Android 13+ the ramdisk isn't
-  # even in boot.img anymore, it's a separate per-partition init_boot.img.
-  # None of that is something a build host can produce without already
-  # knowing the specific device.
-  #
-  # The fix: don't build boot.img on the host at all. Pull it apart and
-  # back together on the *phone*, inside update-binary, where the real
-  # stock boot/init_boot partition for that exact device is sitting right
-  # there. All this pipeline supplies ahead of time is the two pieces
-  # that genuinely are generic -- the Halium ramdisk, and a boot-image
-  # (un)packer -- bundled into the zip so update-binary doesn't need
-  # network access on the phone. The kernel, dtb, and header metadata all
-  # come from the device's own stock image, so they're correct by
-  # construction instead of guessed from a version string.
-  #
-  # For the (un)packer: AOSP's own mkbootimg/unpack_bootimg are Python,
-  # and TWRP's minimal busybox environment doesn't reliably have a
-  # working python3. magiskboot (topjohnwu/Magisk) is the standard
-  # answer to exactly this problem in the wild -- a single static
-  # aarch64 binary, no interpreter, that auto-detects and unpacks/repacks
-  # any Android boot image layout (plain, vendor_boot, GKI header v3/v4)
-  # and is routinely run from inside recovery/TWRP by flashable-zip
-  # installers (that's literally what Magisk's own install script does).
-  # Pulled from the latest Magisk GitHub release rather than vendored, so
-  # this always tracks current boot-image format support.
-  # generic (non-per-device) Halium ramdisk. Note this is genuinely
-  # `initramfs-tools-halium`'s own "continuous" release artifact --
-  # confirmed by reading halium-boot's own get-initrd.sh, which fetches
-  # this exact URL pattern when Android.mk builds halium-boot.img the
-  # "normal" way. It is NOT `Halium/halium-boot` releases -- that repo
-  # doesn't publish a ramdisk artifact at all, it's the bootimg-generator
-  # source, not initramfs content.
   : "${KIBA_MOBILE_HALIUM_RAMDISK_URL:=https://github.com/halium/initramfs-tools-halium/releases/download/continuous/initrd.img-touch-arm64}"
 
   echo "=== Fetching boot.img repack ingredients (generic Halium ramdisk + magiskboot) ==="
@@ -2034,8 +1635,6 @@ OOBEAUTOSTART
     || { echo "!! couldn't resolve the latest Magisk release APK via the GitHub API -- can't fetch magiskboot. No fallback -- failing the build." >&2; exit 1; }
   curl -fL -o magisk-latest.apk "${_magisk_apk_url}" \
     || { echo "!! Magisk release APK fetch failed (${_magisk_apk_url}) -- can't fetch magiskboot. No fallback -- failing the build." >&2; exit 1; }
-  # an APK is just a zip; magiskboot ships as a native lib so it survives
-  # Play/APK packaging rules -- pull the arm64-v8a build straight out.
   unzip -o -j magisk-latest.apk 'lib/arm64-v8a/libmagiskboot.so' -d . \
     || { echo "!! couldn't extract libmagiskboot.so (arm64-v8a) from the Magisk APK -- release layout may have changed. No fallback -- failing the build." >&2; exit 1; }
   [ -f libmagiskboot.so ] \
@@ -2045,58 +1644,16 @@ OOBEAUTOSTART
   echo "=== Bundled magiskboot + generic Halium ramdisk for on-device boot.img repack ==="
   cd /w
 
-  # ── package + ship ───────────────────────────────────────────────────────
   tar -C "${_root}" --numeric-owner -cpf "${_out}/kibaos-mobile-rootfs.tar" .
   gzip -9 "${_out}/kibaos-mobile-rootfs.tar"
   sha256sum "${_out}/kibaos-mobile-rootfs.tar.gz" > "${_out}/kibaos-mobile-rootfs.tar.gz.sha256"
 
-  # ── ext4 rootfs.img, built straight from the rootfs tree ────────────────
-  # halium-boot's initramfs expects a loop-mountable image at
-  # /data/rootfs.img, not a tarball (see docs.halium.org/Distribution.html:
-  # "mount /data/rootfs.img /target && switch_root /target $INIT"). The
-  # community halium-install tool builds this image on the *installer's*
-  # host machine specifically to avoid needing a loop-mount-capable mkfs
-  # inside a phone's recovery environment. We can skip that whole problem
-  # here: this build container already has a real e2fsprogs, and modern
-  # mke2fs can seed a filesystem straight from a directory tree with `-d`,
-  # no loop device or root privileges required. So the image gets built
-  # once, right here, at rootfs-tar time -- not down the line in TWRP.
   _rootfs_kb="$(du -sk "${_root}" | cut -f1)"
   _img_kb=$(( _rootfs_kb + (_rootfs_kb / 5) + 262144 ))   # +20% headroom, +256MB floor for OOBE/updates/writes
   mkfs.ext4 -q -F -L kibaos-rootfs -d "${_root}" -m 0 \
     "${_out}/kibaos-mobile-rootfs.img" "${_img_kb}K"
   sha256sum "${_out}/kibaos-mobile-rootfs.img" > "${_out}/kibaos-mobile-rootfs.img.sha256"
 
-  # ── TWRP-flashable installer zip ─────────────────────────────────────────
-  # Real Halium ports overwhelmingly ship a single TWRP-installable zip
-  # rather than making the end user run halium-install by hand (see e.g.
-  # the Redmi 4A Ubuntu Touch port writeup: "the ZIP method is preferred").
-  # There's no single canonical zip-builder upstream for this -- every
-  # port hand-rolls its own META-INF/update-binary -- so this does the
-  # same thing: update-binary here is a shell script (the well-established
-  # SuperSU/AnyKernel3 trick -- TWRP execs it directly off its #!/sbin/sh
-  # shebang instead of treating it as a compiled edify binary, so it
-  # works on any arch without a separate build per device), which copies
-  # kibaos-mobile-rootfs.img to /data/rootfs.img and the fetched GSI to
-  # /data/android-rootfs.img -- filenames per Halium's own documented
-  # rootfs.img mount point plus the android-rootfs.img convention used by
-  # the Halium/android_device_halium_halium_arm64 output and community
-  # install scripts (e.g. JBBgameich's replace-android-image).
-  #
-  # boot.img isn't bundled pre-built anymore -- the ingredients to build
-  # it (magiskboot + the generic Halium ramdisk, fetched a few steps up)
-  # ride along instead, and update-binary below does the actual
-  # unpack/swap-ramdisk/repack against the *device's own* stock boot
-  # (or init_boot, on Android 13+ split-partition devices) at install
-  # time. That's what makes this device-agnostic without needing to know
-  # the target device ahead of time: the kernel/dtb/header always come
-  # from that exact phone's own stock image, never guessed or downloaded.
-  # update-binary still only ever touches a partition it can positively
-  # identify (slot detection, known by-name paths only, hard fallback to
-  # "do it yourself") -- guessing wrong on an unknown device's boot
-  # partition is real bricking risk that /data writes don't carry, and
-  # that safety story doesn't change just because the repack is now
-  # automatic.
   _zip_root="/w/kibaos-mobile-installer-zip"
   rm -rf "${_zip_root}"
   mkdir -p "${_zip_root}/META-INF/com/google/android"
@@ -2111,9 +1668,6 @@ OOBEAUTOSTART
   cat > "${_zip_root}/META-INF/com/google/android/update-binary" << 'UPDATEBINARY'
 #!/sbin/sh
 
-# KibaOS Mobile installer -- flashed from TWRP like any other zip.
-# args per the standard flashable-zip contract: $1=recovery API version,
-# $2=output fd (for ui_print), $3=path to this zip on the device.
 OUTFD="$2"
 ZIPFILE="$3"
 
@@ -2128,29 +1682,12 @@ abort_install() {
 
 ui_print "=== KibaOS Mobile installer ==="
 
-# ── boot.img / init_boot.img repack (on-device, per-device-correct) ─────
-# No pre-built boot image ships in this zip. magiskboot + the generic
-# Halium ramdisk (both bundled below) get used right here, against
-# *this* device's own stock boot/init_boot partition, so the kernel,
-# dtb, and header metadata are always the real ones for this exact
-# phone -- never guessed from a version string or downloaded ahead of
-# time on a build host that has no idea what device it's for.
-#
-# Defensive throughout, same posture as the rest of this installer:
-# only known by-name paths are ever read, a full backup of whatever's
-# already on the partition is written to /data/kibaos-boot-backup/
-# before anything is overwritten, and nothing is dd'd back until
-# unpack+repack have both fully succeeded. If this device's boot layout
-# isn't one magiskboot recognizes, the repack is skipped outright and
-# says so -- no guessing on a partition this installer is this careful
-# about everywhere else.
 _slot=""
 if command -v getprop >/dev/null 2>&1; then
   _slot="$(getprop ro.boot.slot_suffix 2>/dev/null)"
 fi
 
 _find_by_name() {
-  # $1 = partition name, without slot suffix
   for _cand in \
     "/dev/block/bootdevice/by-name/$1${_slot}" \
     "/dev/block/by-name/$1${_slot}" \
@@ -2183,10 +1720,6 @@ else
 
   mkdir -p /data/kibaos-boot-backup
 
-  # Android 13+ devices split the generic ramdisk into its own init_boot
-  # partition and leave boot with just the kernel -- prefer that split
-  # when present so the kernel side is never touched at all. Older/GKI
-  # 1.0-2.0 devices keep ramdisk+kernel together in boot.img.
   if [ -n "${_init_boot_dev}" ]; then
     _target_dev="${_init_boot_dev}"
     _target_name="init_boot"
@@ -2270,9 +1803,6 @@ UPDATEBINARY
   sha256sum "${_out}/kibaos-mobile-installer.zip" > "${_out}/kibaos-mobile-installer.zip.sha256"
   rm -rf "${_zip_root}"
 
-  # Mobile OOBE (kibaos-mobile-oobe) is built and installed into the
-  # rootfs above -- Android-style first-boot flow, no disk-installer
-  # step, gated by /var/lib/kibaos/.oobe-done so it only ever runs once.
   cat > "${_out}/README-INSTALL.md" << 'READMEDOC'
 # KibaOS Mobile — install
 
@@ -2386,36 +1916,11 @@ if [ "${KIBA_ARCH}" = "mobile" ]; then
   exit 0
 fi
 
-# try normal archiso.
-# ALARM doesn't have an archiso package period, so aarch64 always takes
-# the scenic route -- specifically JackMyers001/archiso-aarch64, a fork
-# that adds real aarch64 support to mkarchiso itself (uefi-aarch64.
-# systemd-boot.esp/.eltorito bootmodes, an aarch64-aware
-# _make_boot_on_fat_aarch64 that copies /boot/Image* directly instead of
-# a vmlinuz-*, etc). Stock upstream archiso only targets x86_64 -- it has
-# ARM branch used to detour through JackMyers001/archiso-aarch64 here
-# (ALARM ships no archiso package at all) -- gone along with the rest of
-# the ARM/ISO path. This point in the script is x86_64-only now; mobile
-# already exited via build_kibaos_mobile above before reaching here.
 install_archiso() {
   pacman -S --noconfirm --needed archiso
 }
 install_archiso
 
-# ══════════════════════════════════════════════════════════════════════════
-# Kernel: stock Arch `linux` package, no runtime kernel build
-# ══════════════════════════════════════════════════════════════════════════
-# KibaOS previously built its own "kiba-kernel" package from Arch's kernel
-# source on every CI run (custom localversion, hand-picked config options,
-# a throwaway local pacman repo). That's gone now -- `linux` /
-# `linux-headers` are just pulled straight off Arch's mirrors like any
-# other package (see packages.x86_64 below), same as everything else in
-# this profile. All boot paths, mkinitcpio presets, and GRUB entries below
-# use the stock vmlinuz-linux / initramfs-linux.img names Arch's own
-# package ships, instead of the old vmlinuz-kiba-kernel / initramfs-kiba-
-# kernel.img names.
-
-# ── Paths ─────────────────────────────────────────────────────────────────
 WORKDIR="/w"
 ISO="kibaos-v${RUN_NUM}"
 PROFILE="${WORKDIR}/kiba-profile"
@@ -2424,25 +1929,6 @@ AIROOTFS="${PROFILE}/airootfs"
 cd "${WORKDIR}"
 cp -r /usr/share/archiso/configs/releng/ "${PROFILE}"
 
-# upstream mkinitcpio dropped /usr/lib/initcpio/udev/11-dm-initramfs.rules
-# as of lvm2 2.03.24 -- its contents got folded into 10-dm.rules (see
-# mkinitcpio MR !416). Older archiso releng profiles shipped their own
-# copy of the "archiso" mkinitcpio install hook under this path with a
-# still-dangling reference to that dead file (mkinitcpio-archiso issue
-# #20 upstream), which hard-failed the initramfs build with "file not
-# found" on both arches. 10-dm.rules is already add_file'd right above
-# it in that hook, so the extra line was just dead weight -- stripped
-# before mkarchiso ever runs.
-#
-# Current archiso (89-1 and later) no longer ships this file as part of
-# the releng overlay at all -- confirmed against the package's own file
-# list, the profile now only carries etc/mkinitcpio.conf.d/archiso.conf
-# and etc/mkinitcpio.d/linux.preset, with the "archiso" hook itself
-# supplied some other way at pacstrap time instead of being a static
-# profile file. Guarded on existence so this quietly no-ops on current
-# archiso instead of hard-failing the way it just did -- if a future
-# archiso version brings the file back with the same stale reference,
-# this still patches it.
 if [ -f "${PROFILE}/airootfs/usr/lib/initcpio/install/archiso" ]; then
   sed -i '/11-dm-initramfs\.rules/d' \
     "${PROFILE}/airootfs/usr/lib/initcpio/install/archiso"
@@ -2451,15 +1937,10 @@ fi
 mkdir -p "${AIROOTFS}"
 sed -i 's/^CheckSpace/#CheckSpace/' "${PROFILE}/pacman.conf"
 sed -i 's/^#ParallelDownloads = 5/ParallelDownloads = 10/' "${PROFILE}/pacman.conf"
-# multilib (32-bit x86 compat) doesn't exist as a concept on ARM -- there's
-# no such repo on the Arch Linux ARM mirrors, so only flip it on for x86_64.
 if [ "${KIBA_ARCH}" = "x86_64" ]; then
   sed -i '/^#\[multilib\]/,/^#Include/ s/^#//' "${PROFILE}/pacman.conf"
 fi
 
-# ══════════════════════════════════════════════════════════════════════════
-# profiledef.sh
-# ══════════════════════════════════════════════════════════════════════════
 cat > "${PROFILE}/profiledef.sh" << 'PROFILEDEF'
 #!/usr/bin/env bash
 iso_name="kibaos"
@@ -2483,24 +1964,12 @@ file_permissions=(
 PROFILEDEF
 chmod +x "${PROFILE}/profiledef.sh"
 
-# arm patch pass for profiledef.sh. heredoc's quoted on purpose so
-# $(date...) doesn't fire early, so sed does the arm edits after the
-# fact instead of baking them into the heredoc itself.
 if [ "${KIBA_ARCH}" = "aarch64" ]; then
-  # GRUB's arm64-efi target is broken upstream (at_keyboard.mod never gets
-  # built for it -- see install_archiso above), so aarch64 boots via
-  # systemd-boot instead, using the bootmode names JackMyers001's fork
-  # adds to mkarchiso for this exact purpose.
   sed -i "s/bootmodes=('uefi.grub')/bootmodes=('uefi-aarch64.systemd-boot.esp' 'uefi-aarch64.systemd-boot.eltorito')/" "${PROFILE}/profiledef.sh"
   sed -i 's/arch="x86_64"/arch="aarch64"/' "${PROFILE}/profiledef.sh"
-  # x86 bcj filter on arm binaries doesn't explode, just squishes worse
-  # (wrong instruction set to filter for). swap to the arm64 one instead
   sed -i "s/'-Xbcj' 'x86'/'-Xbcj' 'arm64'/" "${PROFILE}/profiledef.sh"
 fi
 
-# ══════════════════════════════════════════════════════════════════════════
-# /etc/os-release
-# ══════════════════════════════════════════════════════════════════════════
 mkdir -p "${AIROOTFS}/etc"
 cat > "${AIROOTFS}/etc/os-release" << 'OSRELEASE'
 NAME="KibaOS"
@@ -2516,9 +1985,6 @@ BUG_REPORT_URL="https://github.com/WolfTech-Innovations/Kiba/issues"
 LOGO=kibaos
 OSRELEASE
 
-# ══════════════════════════════════════════════════════════════════════════
-# Package list
-# ══════════════════════════════════════════════════════════════════════════
 cat > "${PROFILE}/packages.x86_64" << 'PACKAGES'
 archlinux-keyring
 dosfstools
@@ -2527,13 +1993,6 @@ base
 linux
 linux-headers
 linux-firmware
-# linux-firmware split the Intel GuC/HuC blobs (i915/*_guc_*.bin,
-# i915/*_huc_*.bin) out into their own package -- stock `linux` doesn't
-# pull it in as a dependency itself, so it has to be listed explicitly
-# here or i915 loads and modesets simpledrm's fbdev fine, but GuC init
-# fails and KWin can never get a working renderer: compositor
-# reports "loaded" (it genuinely is), but the display stays black since
-# there's no accelerated render node.
 linux-firmware-intel
 mkinitcpio
 mkinitcpio-archiso
@@ -2597,12 +2056,7 @@ pkg-config
 gdm
 budgie-desktop
 budgie-session
-# budgie-extras = Ubuntu Budgie's applet suite (VisualSpace, Window Shuffler,
-# Previews, Quickchar, etc). In Arch's [extra] repo -- Raven itself is part
-# of budgie-desktop, nothing separate to install for it.
 budgie-extras
-# Budgie Welcome (Ubuntu Budgie's greeter app, installed from source below)
-# is a Python + WebKit GTK app; sassc compiles its stylesheet
 webkit2gtk-4.1
 python-gobject
 labwc
@@ -2683,13 +2137,8 @@ v4l2loopback-dkms
 xdg-utils
 gawk
 totem
-# Apps: Kooha (screen recorder), Malcontent (parental controls), File Roller
-# (archive manager), Photos (GNOME Photos), Haruna (video player). Joplin
-# isn't in the official repos -- installed from its AppImage further down.
 kooha
 malcontent
-# VibePanel's one runtime lib not already in the list (bluez, upower,
-# networkmanager, libpulse/pipewire-pulse are all installed above)
 gtk4-layer-shell
 file-roller
 gnome-photos
@@ -2701,7 +2150,6 @@ gst-plugins-bad
 plymouth
 squashfs-tools
 
-# ── Windows app support (WinApps) ────────────────────────────────────────
 freerdp
 docker
 docker-compose
@@ -2711,111 +2159,39 @@ openbsd-netcat
 zenity
 pciutils
 
-# ── Security ───────────────────────────────────────────────────────────
 
-# ── Storage/initcpio support ─────────────────────────────────────────────
 lvm2
 
-# ── System tuning/maintenance ────────────────────────────────────────────
 tuned
 PACKAGES
-# arm package swap: right kernel, drop the intel-only stuff, rename
-# the file so archiso can actually find it
 if [ "${KIBA_ARCH}" = "aarch64" ]; then
-  # intel gpu firmware -- arm doesn't have an intel gpu to feed it to
   sed -i '/^linux-firmware-intel$/d' "${PROFILE}/packages.x86_64"
   sed -i '/^# linux-firmware split the Intel GuC\/HuC blobs/,/^# fails and KWin can never get a working renderer/d' \
     "${PROFILE}/packages.x86_64"
-  # thermald: Intel-specific thermal daemon, doesn't exist for ARM
   sed -i '/^thermald$/d' "${PROFILE}/packages.x86_64"
-  # syslinux: x86 BIOS bootloader package, ALARM doesn't ship it at all
-  # (memdiskfind loss is fine -- BIOS/isolinux boot is already dropped on
-  # this arch, see the comment above this package's line for why it was
-  # here in the first place)
   sed -i '/^syslinux$/d' "${PROFILE}/packages.x86_64"
-  # lib32-*: 32-bit x86 multilib compat packages -- multilib isn't a thing
-  # on ARM (see the pacman.conf multilib gating elsewhere in this script)
   sed -i '/^lib32-mesa$/d; /^lib32-vulkan-icd-loader$/d' "${PROFILE}/packages.x86_64"
-  # mkinitcpio-archiso: this is exactly what JackMyers001/archiso-aarch64
-  # exists to work around -- ALARM has no usable mkinitcpio-archiso, so
-  # the fork's own mkarchiso already drops the archiso/archiso_pxe_*/
-  # archiso_kms initcpio hooks straight onto the target airootfs itself
-  # before pacstrap ever runs. Leaving this package in packages.aarch64
-  # makes pacstrap try to lay the same files down a second time via
-  # pacman, which refuses ("exists in filesystem") since it doesn't
-  # already own them -- that's the "Failed to install packages to new
-  # root" pacstrap failure this specifically avoids.
   sed -i '/^mkinitcpio-archiso$/d' "${PROFILE}/packages.x86_64"
-  # ALARM names its kernel package linux-aarch64, not plain "linux"
   sed -i 's/^linux$/linux-aarch64/; s/^linux-headers$/linux-aarch64-headers/' \
     "${PROFILE}/packages.x86_64"
   mv "${PROFILE}/packages.x86_64" "${PROFILE}/packages.aarch64"
 fi
 
-# ══════════════════════════════════════════════════════════════════════════
-# mkinitcpio
-# ══════════════════════════════════════════════════════════════════════════
-# archiso.conf is ONLY for the live environment (memdisk/archiso hooks).
-# plymouth's in there so live boot can actually show our splash, and kms
-# has to come before archiso so the framebuffer exists in time for
-# plymouth to have something to draw on. gotta add both here since
-# mkarchiso only bakes this file's hooks into the live ISO initramfs
-# (see linux.preset's archiso_config= below) — installed.conf is a
-# completely separate thing and mkarchiso never even looks at it.
 mkdir -p "${AIROOTFS}/etc/mkinitcpio.conf.d"
 cat > "${AIROOTFS}/etc/mkinitcpio.conf.d/archiso.conf" << 'INITRAMFS'
 HOOKS=(base udev kms plymouth keyboard keymap modconf memdisk archiso block filesystems)
-# mkinitcpio's default compression is zstd, which some older GRUB builds
-# don't recognize -- known upstream as an "invalid magic number" error on
-# newer image/decompressor formats that predates the GRUB patch adding
-# support for them. Older UEFI boards are exactly where an older,
-# unpatched GRUB is more likely to still be in the boot chain. gzip is
-# the one format every GRUB version has always understood, at the cost
-# of a slightly larger initramfs and marginally slower decompression --
-# a fine trade for booting reliably on old hardware.
 COMPRESSION="gzip"
 INITRAMFS
 
-# ARM: drop the memdisk hook -- it needs the memdiskfind binary, which
-# ships in the `syslinux` package (kept deliberately on x86_64 for this
-# reason, see the packages.x86_64 comment above `syslinux` for why it's
-# there even with BIOS boot dropped). ALARM has no syslinux package at
-# all, so on aarch64 the binary can never be present and mkinitcpio just
-# hard-fails every build ("ERROR: module not found: 'phram'" / "ERROR:
-# binary not found: 'memdiskfind'"), which is what actually turns
-# mkinitcpio's generic "errors were encountered during the build"
-# warning into a nonzero exit -- not the sbctl post hook that runs after
-# it and just skips signing cleanly when no Secure Boot keys exist yet.
-# x86_64 keeps memdisk (and its RAM-load-the-whole-ISO capability) intact.
 if [ "${KIBA_ARCH}" = "aarch64" ]; then
   sed -i 's/ memdisk / /' "${AIROOTFS}/etc/mkinitcpio.conf.d/archiso.conf"
 fi
 
-# installed.conf is what the INSTALLED system uses once the OOBE installer
-# runs initcpio. no memdisk/archiso hooks allowed here, those are live-only
-#
-# HOOKS order fixed to match Arch's documented "sane defaults" order
-# (base udev autodetect modconf kms keyboard keymap block filesystems
-# fsck -- see mkinitcpio.conf's own upstream comments and the ArchWiki
-# Plymouth page). `autodetect` has to come right after base/udev and
-# BEFORE the other module-affecting hooks (modconf, kms, block,
-# filesystems) -- that's what lets it trim their module list down to
-# what's actually present on this machine; anything placed ahead of it
-# (like the old kms/plymouth-before-autodetect order here) just skips
-# that trim for itself and bloats the initramfs. Not the direct cause
-# of a root-not-found failure, but a real correctness bug regardless.
-# `plymouth` placed right after udev per the ArchWiki's own Plymouth
-# hook-ordering guidance.
 cat > "${AIROOTFS}/etc/mkinitcpio.conf.d/installed.conf" << 'INSTALLED_HOOKS'
 HOOKS=(base udev plymouth autodetect modconf kms keyboard keymap block filesystems fsck)
 COMPRESSION="gzip"
 INSTALLED_HOOKS
 
-# Filename here has to stay "linux.preset" -- that's the specific path
-# mkarchiso's own initramfs-build step looks for. This is stock `linux`'s
-# own preset name/layout, but it's hand-written here (not the one the
-# package's pacman hook would generate) since mkarchiso never touches
-# that one; it only ever runs this file.
 mkdir -p "${AIROOTFS}/etc/mkinitcpio.d"
 cat > "${AIROOTFS}/etc/mkinitcpio.d/linux.preset" << 'PRESET'
 PRESETS=('archiso')
@@ -2823,58 +2199,16 @@ ALL_kver='/boot/vmlinuz-linux'
 archiso_config='/etc/mkinitcpio.conf.d/archiso.conf'
 archiso_image='/boot/initramfs-linux.img'
 PRESET
-# aarch64: the fork's own bundled configs/releng (copied in via cp -r
-# above -- this is what /usr/share/archiso/configs/releng actually is on
-# this arch, since install_archiso() never installs a real `archiso`
-# package here, only builds+installs JackMyers001/archiso-aarch64's own
-# copy) ships its own /etc/mkinitcpio.d/linux-aarch64.preset as part of
-# that same overlay, per its README ("moved archiso initcpio files
-# directly into the releng airootfs" to patch around ALARM's stock
-# mkinitcpio-archiso hooks). _make_custom_airootfs copies this overlay
-# into pacstrap_dir BEFORE _make_packages() pacstraps `linux-aarch64`
-# (see mkarchiso's own function order) -- so that inherited preset file
-# collides with the one the real linux-aarch64 package also tries to
-# install, and pacstrap refuses to overwrite a file it doesn't already
-# own ("linux-aarch64.preset exists in filesystem"). Safe to just delete
-# it: nothing in this build ever reads it -- customize_airootfs.sh
-# invokes mkinitcpio by hand for aarch64 with explicit -k/-c/-g flags
-# (see the ARM initramfs section further down) specifically because
-# ALARM's linux-aarch64 package doesn't carry the pacman hook that would
-# auto-trigger it off this preset in the first place.
 if [ "${KIBA_ARCH}" = "aarch64" ]; then
   rm -f "${AIROOTFS}/etc/mkinitcpio.d/linux-aarch64.preset"
 fi
-# NOTE: this stays at the generic vmlinuz-linux/initramfs-linux.img names
-# for BOTH arches now. On aarch64, ALL_kver here is moot anyway --
-# customize_airootfs.sh invokes mkinitcpio directly with an explicit -k
-# "$(uname -r)" for that arch (see below) rather than relying on ALL_kver
-# path resolution, since ALARM's linux-aarch64 package never drops a
-# vmlinuz-linux file to resolve against in the first place (only
-# /boot/Image and /boot/Image.gz -- see the systemd-boot loader entry
-# further down, which references /boot/Image directly).
 
-# ══════════════════════════════════════════════════════════════════════════
-# Boot menu — GRUB (x86_64) or systemd-boot (aarch64), UEFI only
-# ══════════════════════════════════════════════════════════════════════════
-# releng ships both syslinux/ (BIOS) and efiboot/ (systemd-boot) by
-# default. BIOS boot is gone on both arches, so syslinux/ always goes.
-# efiboot/ is x86_64's dead weight (GRUB is what boots x86_64) but it's
-# exactly what aarch64 needs (systemd-boot, per install_archiso's note on
-# why GRUB's arm64-efi target doesn't work) -- so only strip efiboot/ on
-# x86_64, and generate fresh content into it for aarch64 instead of also
-# deleting it there.
 rm -rf "${PROFILE}/syslinux"
 
 if [ "${KIBA_ARCH}" = "x86_64" ]; then
   rm -rf "${PROFILE}/efiboot"
   mkdir -p "${PROFILE}/grub"
 
-  # grub.cfg is a template — mkarchiso fills in %ARCHISO_LABEL%,
-  # %INSTALL_DIR%, %ARCH%, %ARCHISO_SEARCH_FILENAME% for us at build time
-  # (see _build_grub_config in mkarchiso). GRUB just draws its splash right
-  # away no matter what the timeout is — unlike systemd-boot, which needs
-  # timeout>=1 to even show one — so timeout=0 here means we boot straight
-  # in without hitting that systemd-boot splash bug from before.
   cat > "${PROFILE}/grub/grub.cfg" << 'GRUBCFG'
 set default=0
 set timeout=0
@@ -2901,15 +2235,6 @@ if [ "${grub_platform}" == "efi" ]; then
 fi
 GRUBCFG
 else
-  # aarch64: systemd-boot. loader.conf/entries/*.conf format and the
-  # %ARCHISO_LABEL%/%INSTALL_DIR%/%ARCH% templating are the same
-  # mkarchiso mechanism GRUB used above, just read out of efiboot/loader
-  # instead of grub/grub.cfg -- see JackMyers001/archiso-aarch64's own
-  # releng profile, which this is matched against directly. Entries
-  # reference /boot/Image (the uncompressed EFI-stub kernel ALARM's
-  # linux-aarch64 package actually ships -- see customize_airootfs.sh's
-  # note on why there's no vmlinuz-* on this arch at all) and the generic
-  # initramfs-linux.img the preset above still produces.
   mkdir -p "${PROFILE}/efiboot/loader/entries"
   cat > "${PROFILE}/efiboot/loader/loader.conf" << 'LOADERCONF'
 timeout 0
@@ -2929,19 +2254,13 @@ options archisobasedir=%INSTALL_DIR% archisolabel=%ARCHISO_LABEL% cow_spacesize=
 ENTRYCONF
 fi
 
-# ══════════════════════════════════════════════════════════════════════════
-# pacman.conf tweaks
-# ══════════════════════════════════════════════════════════════════════════
 PACMAN_CONF="${PROFILE}/pacman.conf"
 if [ -f "${PACMAN_CONF}" ]; then
   grep -q 'NoExtract' "${PACMAN_CONF}" || \
-    sed -i '/^\[options\]/a NoExtract  = usr/share/man/* usr/share/info/* usr/share/doc/*\nNoExtract  = usr/share/locale/* !usr/share/locale/en_US/* !usr/share/locale/en_GB/* !usr/share/locale/locale.alias' \
+    sed -i '/^\[options\]/a NoExtract  = usr/share/man/* usr/share/info/* usr/share/doc/*' \
     "${PACMAN_CONF}"
 fi
 
-# ══════════════════════════════════════════════════════════════════════════
-# liveuser account
-# ══════════════════════════════════════════════════════════════════════════
 LIVE_HASH=$(openssl passwd -6 "live")
 grep -q '^liveuser:' "${AIROOTFS}/etc/passwd"  2>/dev/null || \
   echo 'liveuser:x:1000:1000:KibaOS Live User:/home/liveuser:/bin/bash' >> "${AIROOTFS}/etc/passwd"
@@ -2954,9 +2273,6 @@ mkdir -p "${AIROOTFS}/etc/sudoers.d"
 echo 'liveuser ALL=(ALL) NOPASSWD: ALL' > "${AIROOTFS}/etc/sudoers.d/liveuser"
 chmod 0440 "${AIROOTFS}/etc/sudoers.d/liveuser"
 
-# ══════════════════════════════════════════════════════════════════════════
-# systemd symlinks
-# ══════════════════════════════════════════════════════════════════════════
 WANTS="${AIROOTFS}/etc/systemd/system"
 mkdir -p "${WANTS}/default.target.wants" "${WANTS}/multi-user.target.wants"
 ln -sf /usr/lib/systemd/system/graphical.target       "${WANTS}/default.target"
@@ -2964,9 +2280,6 @@ ln -sf /usr/lib/systemd/system/gdm.service             "${WANTS}/display-manager
 ln -sf /usr/lib/systemd/system/pacman-init.service    "${WANTS}/multi-user.target.wants/pacman-init.service"
 ln -sf /usr/lib/systemd/system/bluetooth.service      "${WANTS}/multi-user.target.wants/bluetooth.service"
 
-# ══════════════════════════════════════════════════════════════════════════
-# customize_airootfs.sh — runs inside chroot at build time
-# ══════════════════════════════════════════════════════════════════════════
 mkdir -p "${AIROOTFS}/root"
 cat > "${AIROOTFS}/root/customize_airootfs.sh" << 'CUSTOMIZE'
 #!/usr/bin/env bash
@@ -2974,53 +2287,23 @@ set -e
 
 rm -f /etc/machine-id
 touch /etc/machine-id
-# dbus-daemon refuses to start at all -- even a private session bus via
-# dbus-run-session -- without a valid /etc/machine-id, and this script
-# later needs a working dbus session (liveuser dconf/panel provisioning
-# further down). Give the chroot a real, temporary machine-id now so
-# everything in between works; it gets blanked again right before this
-# script exits so the shipped image still generates its own on first boot.
 systemd-machine-id-setup
 
-# ── spin up the sysusers.d users (polkitd etc) by hand ─────────────────────
-# normally pacman fires this off as a post-install hook on a live system,
-# but that hook just doesn't reliably trigger when packages get unpacked
-# straight into an airootfs, so stuff like polkitd never gets a user and
-# then polkitd faceplants on boot ("Could not activate remote peer
-# 'org.freedesktop.PolicyKit1': startup job failed"). so just run it
-# ourselves here instead of hoping pacman does it.
 rm /usr/lib/sysusers.d/basic.conf
 rm /usr/lib/sysusers.d/arch.conf
 systemd-sysusers || true
 systemd-tmpfiles --create 2>/dev/null || true
 
-# ── polkitd fallback, just in case ──────────────────────────────────────────
-# belt and suspenders: if systemd-sysusers above whiffed in this chroot for
-# whatever reason, this makes sure the polkitd user exists anyway so
-# polkitd can actually start (same failure mode as above otherwise)
 id polkitd &>/dev/null || useradd -r -U -M -d /run/polkit -s /usr/bin/nologin polkitd
 
-# ── alpm user ──────────────────────────────────────────────────────────────
 useradd -r -s /usr/bin/nologin -U alpm 2>/dev/null || true
 mkdir -p /var/cache/pacman/pkg
 chmod 755 /var/cache/pacman /var/cache/pacman/pkg
 chown -R alpm:alpm /var/cache/pacman
-# multilib doesn't exist on ARM mirrors -- this chroot script is shared
-# between x86_64 and aarch64 builds, so check uname -m rather than assume.
 if [ "$(uname -m)" = "x86_64" ]; then
   sed -i '/^#\[multilib\]/,/^#Include/ s/^#//' /etc/pacman.conf
 fi
 
-# ── x86_64 mirror fallback ──────────────────────────────────────────────────
-# The airootfs's /etc/pacman.d/mirrorlist as shipped by mkarchiso only has
-# geo.mirror.pkgbuild.com uncommented -- fine normally, but on an
-# Azure-hosted CI runner a single geo-balanced mirror having a bad day (rate
-# limit, regional outage, TLS hiccup) hard-fails every `pacman -S` in this
-# chroot with no retry target. aarch64 already gets equivalent redundancy
-# for free since ALARM's mirror.archlinuxarm.org rarely wobbles the same
-# way, so only bother with this on x86_64. Order matters -- pacman walks
-# these top to bottom per-download, so keep the geo mirror first and
-# well-known, stable, high-bandwidth mirrors after it as fallback.
 if [ "$(uname -m)" = "x86_64" ]; then
   cat > /etc/pacman.d/mirrorlist << 'MIRRORLIST'
 Server = https://geo.mirror.pkgbuild.com/$repo/os/$arch
@@ -3030,41 +2313,11 @@ Server = https://mirror.rackspace.com/archlinux/$repo/os/$arch
 MIRRORLIST
 fi
 
-# CheckSpace already got disabled for the airootfs pacstrap up in
-# kibaos.sh's PROFILE/pacman.conf, but that edit isn't guaranteed to have
-# carried over into THIS chroot's own live /etc/pacman.conf, so — belt and
-# suspenders again — do it here too. CheckSpace is notorious for false-
-# positiving on overlay filesystems (its statvfs() call just lies about
-# free space on overlay2, which is what basically every Docker CI runner
-# uses), and worse, its "not enough free disk space... Proceed? [Y/n]"
-# prompt doesn't respect --noconfirm like the normal prompts do. in a
-# non-interactive CI shell with no stdin that's the actual thing hanging
-# the build, not a real space problem.
 sed -i 's/^CheckSpace/#CheckSpace/' /etc/pacman.conf
 
-# ── nuke and rebuild the pacman keyring inside THIS chroot ─────────────────
-# "keyring is not writable" / "required key missing from keyring" shows up
-# whenever /etc/pacman.d/gnupg's ownership/perms don't line up with
-# whatever UID is actually running pacman in here — happens a lot in CI
-# where the outer Docker layer and this arch-chroot session don't quite
-# match, even though mkarchiso already set up a keyring earlier. GnuPG's
-# picky about homedir perms (has to be 0700, owned by whoever's calling
-# it), so instead of chasing down which UID owns what, just blow it away
-# and rebuild clean under whatever's actually running this script.
 rm -rf /etc/pacman.d/gnupg
 pacman-key --init
 pacman-key --populate archlinux
-# ALARM-signed packages (gtk4-layer-shell, patchelf, pip's aarch64 deps
-# like python-cryptography/python-cffi, etc.) are signed by the Arch
-# Linux ARM Build System key, which the archlinux keyring above does not
-# carry. Without this, `pacman -S` on any ALARM package later in this
-# script fails with "signature ... unknown trust" -- the key gets
-# auto-fetched but never locally signed. This mirrors the recv/lsign done
-# for work/pacman-gnupg near the end of the outer build script, but that
-# one only covers the keyring pacstrap uses to populate the airootfs --
-# this chroot rebuilt its own separate keyring above, so it needs the
-# same treatment independently. $KIBA_ARCH isn't visible inside this
-# chroot, so detect via uname instead.
 if [ "$(uname -m)" = "aarch64" ]; then
   pacman-key --recv-keys 68B3537F39A313B3E574D06777193F152BDBE6A6 \
     --keyserver keyserver.ubuntu.com
@@ -3072,27 +2325,8 @@ if [ "$(uname -m)" = "aarch64" ]; then
 fi
 pacman -Syy --noconfirm
 
-# ── clear out disk before we install anything else ──────────────────────────
-# by now mkarchiso's already pacstrapped the whole ~195-package
-# packages.x86_64 list (chromium, mesa, all of it) into this
-# airootfs, and every single .pkg.tar.zst is still sitting in the cache —
-# nothing cleared it until the very end of the script before. everything
-# coming up next (KWin, OOBE, and whatever else builds from source below)
-# needs real scratch
-# disk on top of that, and THAT'S what was actually running the image out
-# of space, not any one install being huge. -Scc (double-c) nukes cached
-# packages of every version, not just the outdated ones.
 pacman -Scc --noconfirm
 
-# earlyoom (just polls free mem/swap thresholds) and systemd-oomd
-# (cgroup-aware, uses PSI) both do the same job of OOM-killing stuff, so
-# running both at once just means they can race and kill different
-# processes for the same pressure event. systemd-oomd already ships
-# inside systemd itself (no extra package) and is the more modern,
-# desktop-integrated pick since it already understands user.slice/session
-# cgroups, so that's the one that's actually enabled. earlyoom stays
-# installed but off, just sitting there as a fallback if oomd ever gets
-# ripped out.
 systemctl disable earlyoom 2>/dev/null || true
 mkdir -p /etc/systemd/oomd.conf.d
 cat > /etc/systemd/oomd.conf.d/kibaos.conf << 'OOMDCONF'
@@ -3110,14 +2344,6 @@ vm.dirty_background_ratio=5
 fs.inotify.max_user_watches=524288
 net.core.netdev_max_backlog=16384
 SYSCTL
-
-# NOTE: there used to be a binfmt_misc registration here
-# (/etc/binfmt.d/wine.conf, matching on the MZ header) that routed .exe
-# execution straight through Wine at the kernel level. That's gone now
-# along with Wine itself. Windows programs aren't launched by double-
-# clicking an .exe anymore either -- see the WinApps section below, which
-# now opens the whole Windows environment as one fullscreen workspace
-# instead of routing individual files through a mimeapps default.
 
 pacman-key --init
 pacman-key --populate archlinux
@@ -3147,9 +2373,6 @@ sed -i 's/#Storage=auto/Storage=volatile/'                    /etc/systemd/journ
 sed -i 's/#HandleLidSwitch=suspend/HandleLidSwitch=ignore/'   /etc/systemd/logind.conf
 sed -i 's/#HandleSuspendKey=suspend/HandleSuspendKey=ignore/' /etc/systemd/logind.conf
 sed -i 's/#IdleAction=ignore/IdleAction=ignore/'               /etc/systemd/logind.conf
-# Explicitly zero out the idle-action timer so logind never fires it,
-# and suppress the hibernate/power keys too — this is a live/install session,
-# nothing should put the machine to sleep mid-install.
 grep -q 'IdleActionSec'  /etc/systemd/logind.conf || echo 'IdleActionSec=0'  >> /etc/systemd/logind.conf
 grep -q 'HandleHibernateKey' /etc/systemd/logind.conf || echo 'HandleHibernateKey=ignore' >> /etc/systemd/logind.conf
 grep -q 'HandleLidSwitchDocked' /etc/systemd/logind.conf || echo 'HandleLidSwitchDocked=ignore' >> /etc/systemd/logind.conf
@@ -3157,24 +2380,9 @@ grep -q 'HandleLidSwitchExternalPower' /etc/systemd/logind.conf || echo 'HandleL
 grep -q 'HandlePowerKey' /etc/systemd/logind.conf && \
   sed -i 's/^HandlePowerKey=.*/HandlePowerKey=poweroff/' /etc/systemd/logind.conf
 
-# Belt-and-suspenders: mask the sleep targets themselves so nothing on the
-# live/install image — a stray udev rule, a misbehaving app, a battery
-# driver's default — can put the machine to sleep mid-session or mid-install.
 systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target suspend-then-hibernate.target
 
-# ══════════════════════════════════════════════════════════════════════════
-# BRANDING ASSETS
-# ══════════════════════════════════════════════════════════════════════════
 WALLPAPER_URL="https://raw.githubusercontent.com/KibaLabsLLC/Kiba/refs/heads/main/assets/wallpapers/F700436B-3FFC-4570-8BD2-623082C75533.png"
-# One shared source image now backs both the app-icon set (kibaos.png /
-# hicolor icons) and the Plymouth boot splash. This asset (unlike the old
-# one this pipeline used to point at) is already a single centered square
-# badge with no separate wordmark -- 1254x1254, transparent/white field,
-# nothing to crop out -- so both the splash and the icon set below just
-# resize it directly rather than cropping a badge out of a landscape
-# lockup. The OOBE installer logo further below reuses this same
-# processed image too, so there's still only one brand asset to keep in
-# sync, just without the crop step the old lockup composition needed.
 BOOT_SPLASH_URL="https://github.com/WolfTech-Innovations/Kiba/blob/main/assets/splash/splash.png?raw=true"
 WALLPAPER_DEST="/usr/share/kibaos/wallpaper.jpg"
 LOGO_SRC="/usr/share/kibaos/logo-raw.png"
@@ -3191,14 +2399,8 @@ mkdir -p /usr/share/kibaos /usr/share/pixmaps
 curl -fL --retry 5 --retry-delay 3 -o "${BOOT_SPLASH_RAW}" "${BOOT_SPLASH_URL}" || true
 
 if [ -f "${BOOT_SPLASH_RAW}" ] && file "${BOOT_SPLASH_RAW}" | grep -qi 'image'; then
-  # Boot splash: already square, scaled down, aspect kept.
   magick "${BOOT_SPLASH_RAW}" -filter Lanczos -resize '480x480>' "${BOOT_SPLASH}"
 
-  # App icons + taskbar launcher icon: this source is already just the
-  # centered badge, so it goes straight through as the icon source with
-  # no crop -- the old fixed crop box (640x640, offset 450,117) was
-  # measured against the previous landscape lockup image and would slice
-  # this square badge wrong.
   cp "${BOOT_SPLASH_RAW}" "${LOGO_SRC}"
   rm -f "${BOOT_SPLASH_RAW}"
 fi
@@ -3231,21 +2433,6 @@ cp "${LOGO_48}"  /usr/share/icons/hicolor/48x48/apps/kibaos.png
 cp "${LOGO_32}"  /usr/share/icons/hicolor/32x32/apps/kibaos.png
 gtk-update-icon-cache /usr/share/icons/hicolor/ 2>/dev/null || true
 
-# ── Flat-white badge for the top-panel Raven trigger ────────────────────────
-# Panel/status icons are conventionally monochrome ("symbolic") so they
-# read cleanly against a dark bar -- pulling the full two-tone LOGO_256
-# straight onto the panel would look muddy at 16-24px anyway. This
-# recolors the badge's own alpha silhouette solid white rather than
-# hand-drawing a separate glyph, so it always matches whatever the boot
-# splash actually is.
-#
-# RavenTriggerApplet.plugin ships Icon=pane-show-symbolic (confirmed from
-# the plugin's own [Plugin] metadata) with no per-instance icon override
-# in its dconf schema, so the only reliable way to swap it is overriding
-# that icon NAME in the icon theme itself -- same trick used for other
-# fixed-icon system UI below. This does mean anything else on the system
-# that happens to ask for "pane-show-symbolic" gets our badge too, but
-# nothing else in this image does.
 BADGE_WHITE_SRC="/usr/share/kibaos/badge-white.png"
 magick "${LOGO_256}" -alpha extract -threshold 50% /tmp/kiba-badge-alpha.png
 magick -size 256x256 xc:white /tmp/kiba-badge-white.png
@@ -3266,38 +2453,12 @@ cp "${BADGE_WHITE_SRC}" /usr/share/icons/hicolor/scalable/actions/pane-show-symb
 cp "${BADGE_WHITE_SRC}" /usr/share/icons/hicolor/symbolic/actions/pane-show-symbolic.png
 gtk-update-icon-cache /usr/share/icons/hicolor/ 2>/dev/null || true
 
-# ── OOBE installer logo — same image as the boot splash ─────────────────
-# Reuses the already-processed BOOT_SPLASH file directly (full lockup:
-# badge + "KibaOS" wordmark) instead of fetching/maintaining a second,
-# separate installer.png brand asset. Falls back to the generic cropped-
-# badge logo only if the boot splash itself never downloaded (offline
-# build, URL moved, etc.) -- same fallback behavior as before.
 if [ -f "${BOOT_SPLASH}" ]; then
   cp "${BOOT_SPLASH}" "${INSTALLER_LOGO}"
 else
   cp "${LOGO_256}" "${INSTALLER_LOGO}"   # fallback: reuse the generic logo
 fi
 
-# ── winapps-setup.vala ──────────────────────────────────────────────────
-# GTK4/libadwaita frontend for kibaos-winapps-setup, the headless
-# PROGRESS/FATAL backend defined in the WINDOWS APP SUPPORT section
-# further down. Built as a second executable in the same meson project as
-# the OOBE app rather than a whole separate build tree -- one shared
-# vala/gtk4/libadwaita toolchain, one `meson setup && ninja` invocation,
-# same dependency versions guaranteed for both.
-#
-# Deliberately its OWN small file rather than folded into main.vala:
-# kiba_install_finalize() (see kiba_install.h/kiba_install.c further down)
-# rm -rf's the whole usr/share/kibaos-oobe tree on every normal disk
-# install, since KibaOOBE only ever runs during install/OEM-finish and
-# has no reason to exist afterward. This app is the opposite -- it's what
-# a person launches from the app menu on an already-installed system,
-# potentially months later -- so it can't depend on anything under
-# kibaos-oobe/ surviving that cleanup. It only reuses libadwaita's own
-# semantic style classes (title-1, dim-label, suggested-action, flat),
-# not oobe.css, for exactly that reason: nothing here needs a resource
-# file to exist post-install, just the compiled binary itself, which
-# lands in /usr/bin -- untouched by the live_only cleanup list.
 mkdir -p /usr/share/WA/src
 cat > /usr/share/WA/src/winapps-setup.vala << 'WINAPPSSETUPVALA'
 public class KibaWinAppsSetup : Adw.Application {
@@ -3533,7 +2694,6 @@ cmake .. -DCMAKE_BUILD_TYPE=Release
 cmake --build . -j"$(nproc)"
 git clone https://github.com/KibaLabsLLC/KibaD
 cd KibaD/
-# Create KibaD systemd service
 mkdir -p "/usr/lib/systemd/system"
 
 cat > "/usr/lib/systemd/system/kibad.service" <<'EOF'
@@ -3556,13 +2716,10 @@ RestartSec=10
 WantedBy=graphical-session.target
 EOF
 
-# Build KibaD
 cargo build --release
 
-# Install KibaD into the image
 install -Dm755 target/release/kibad \
     "/usr/lib/kibad/kibad"
-
 
 cat > /usr/share/WA/src/meson.build << 'WAMESON'
 project('winapps-setup', 'vala', 'c', version: '1.0')
@@ -3586,37 +2743,13 @@ mkdir -p /usr/share/icons/hicolor/scalable/actions
 cp /usr/share/kibaos/logo-256.png /usr/share/icons/hicolor/scalable/actions/kibaos-watermark-symbolic.png 2>/dev/null || true
 gtk-update-icon-cache /usr/share/icons/hicolor/ 2>/dev/null || true
 
-
-
-# ── Privileged backend: libkibadisk + kibaos-oobe-backend ─────────────────
-# this fully replaces the old Python/archinstall-based backend. no
-# archinstall, no parted, no blkid/partprobe subprocesses anywhere near
-# the disk-critical path — check kiba_gpt.c/kiba_fs.c/kiba_udev.c for the
-# from-scratch GPT writer, mkfs/mount wrapper, and udev-settle
-# replacement respectively. the only external tools I kept around are
-# ones that genuinely have no sane from-scratch replacement: unsquashfs,
-# mkfs.fat, mkfs.ext4, useradd/chpasswd, bootctl, mkinitcpio,
-# locale-gen, pacman — all invoked via posix_spawn argv arrays, never a
-# shell, so there's zero string-quoting/injection surface in this
-# backend (same argv-array fix I already did on the Vala/sudo side).
 echo "=== Building libkibadisk (disk/install backend library) ==="
 mkdir -p /usr/share/kibaos-oobe/src/disk
 cd /usr/share/kibaos-oobe/src/disk
 pacman -Rns --noconfirm gcc base-devel debugedit make patch autoconf automake 2>/dev/null || true
 
-# ── kibaos-oem-finish.sh — lightweight OEM-mode completion backend.
-# Runs on an ALREADY-INSTALLED system (imaged by an OEM before shipping —
-# see kibaos-oem-prepare below for how that state is set), so there is no
-# partitioning, no squashfs extraction, no bootloader install here at all.
-# Just locale/keyboard, the real customer account, and removing the OEM
-# marker + temporary OEM account. Mirrors the standard OEM-imaging pattern
-# (locale/keyboard/account-only finish step, no disk work) used by
-# installers like this one. Also always drops /etc/kibaos/winapps-pending
-# -- WinApps is a listed, always-on feature -- see WINDOWS APP SUPPORT
-# further down for what that marker actually triggers.
 cat > /usr/local/bin/kibaos-oem-finish.sh << 'OEMFINISH'
 #!/usr/bin/env bash
-# Args: $1=locale $2=keymap $3=hostname $4=username $5=password
 set -euo pipefail
 
 LOCALE="$1"; KEYMAP="$2"; HOSTNAME_VAL="$3"; USERNAME_VAL="$4"; PASSWORD_VAL="$5"
@@ -3643,12 +2776,6 @@ useradd -m -G wheel,audio,video,input,network,storage,power,docker -s /bin/bash 
   || fail "useradd failed"
 echo "${USERNAME_VAL}:${PASSWORD_VAL}" | chpasswd || fail "chpasswd failed"
 
-# Stash the plaintext password briefly, root-only, so first-login WinApps
-# setup can reuse it as the Windows guest's login instead of a random
-# string nobody's ever shown (see kibaos-winapps-setup, which reads this
-# once via pkexec and deletes it right after). Mirrors what
-# kiba_install_create_user() does for the disk-install path -- this is
-# the OEM-finish equivalent of that same account-creation moment.
 mkdir -p /etc/kibaos
 umask 077
 printf '%s' "${PASSWORD_VAL}" > /etc/kibaos/winapps-userpass
@@ -3656,14 +2783,8 @@ chmod 600 /etc/kibaos/winapps-userpass
 umask 022
 
 progress 85 "Cleaning up OEM account..."
-# Remove the temporary OEM account created by kibaos-oem-prepare, if present.
 userdel -r oem 2>/dev/null || true
 rm -f /var/lib/AccountsService/users/oem 2>/dev/null || true
-# GDM has no LightDM-style conf.d layering to just drop a higher-priority
-# file from -- kibaos-oem-prepare stashed whatever custom.conf looked like
-# before OEM mode (if anything) at custom.conf.pre-oem, so restore that;
-# absent a stashed copy, just delete custom.conf outright so GDM falls
-# back to its own default of no autologin and a normal login screen.
 if [ -f /etc/gdm/custom.conf.pre-oem ]; then
   mv /etc/gdm/custom.conf.pre-oem /etc/gdm/custom.conf
 else
@@ -3680,15 +2801,6 @@ exit 0
 OEMFINISH
 chmod +x /usr/local/bin/kibaos-oem-finish.sh
 
-# ── kibaos-oem-prepare — run by WHOEVER images a device for OEM delivery
-# (not run on a normal end-user install). Creates a temporary autologin
-# "oem" account so the imaged device boots straight to a usable desktop
-# for OEM-side burn-in/testing, and drops the marker file that makes
-# io.kibaos.oobe launch in OEM-finish mode on first real customer boot.
-# This mirrors the standard dont-chroot-style OEM-mode pattern from
-# Calamares-based distros, just implemented as a small script
-# instead of an installer config file, consistent with the rest of this
-# from-scratch installer. ─────────────────────────────────────────────────
 cat > /usr/local/bin/kibaos-oem-prepare << 'OEMPREPARE'
 #!/usr/bin/env bash
 set -e
@@ -3699,10 +2811,6 @@ id oem &>/dev/null || useradd -m -G wheel,audio,video,input,network,storage,powe
 passwd -d oem 2>/dev/null || true
 
 mkdir -p /etc/gdm
-# Stash whatever custom.conf looked like before OEM mode (there may be
-# none, if this device never had one) so kibaos-oem-finish can put it
-# back once the temporary "oem" account is gone -- GDM's custom.conf is
-# one flat file, not a conf.d directory to layer a drop-in on top of.
 [ -f /etc/gdm/custom.conf ] && cp -f /etc/gdm/custom.conf /etc/gdm/custom.conf.pre-oem 2>/dev/null || true
 cat > /etc/gdm/custom.conf << 'GDMOEMCONF'
 [daemon]
@@ -3719,19 +2827,11 @@ XSession=budgie-desktop
 SystemAccount=false
 OEMACCOUNTS
 
-# OOBE app autostarts for the oem user too, in OEM-finish mode (the
-# /etc/kibaos/oem-pending marker is what triggers that mode, not the
-# username — the OOBE app itself doesn't know or care who's logged in).
 echo "OEM mode prepared. This device will boot to a temporary 'oem' account"
 echo "and prompt the customer to finish setup on next boot. Do not run this"
 echo "on a normal end-user installation."
 OEMPREPARE
 chmod +x /usr/local/bin/kibaos-oem-prepare
-
-# NOTE: both OOBE backends launch via `sudo` (covered by the liveuser
-# NOPASSWD sudoers rule above), not `pkexec`, specifically so the installer
-# doesn't depend on D-Bus/polkit being healthy mid-install. No polkit rule
-# is needed here as a result.
 
 if [ -x /usr/bin/io.kibaos.oobe ]; then
   echo "=== KibaOS OOBE installer is the active install path ==="
@@ -3742,23 +2842,12 @@ fi
 
 userdel -r builduser 2>/dev/null || true
 rm -f /etc/sudoers.d/builduser
-# ══════════════════════════════════════════════════════════════════════════
-# BOOT SPLASH — custom "kibaos" Plymouth theme (script-type plugin)
-# ══════════════════════════════════════════════════════════════════════════
-# Previously the Numix Plymouth theme, cloned + `make install`ed from
-# upstream. Swapped out for a small hand-written script theme so the splash
-# uses WolfTech's own branding image (BOOT_SPLASH, fetched above) instead of
-# generic Numix art. `script` is a built-in Plymouth plugin, so this needs
-# no clone/build step — just the theme dir, the .plymouth descriptor, the
-# .script itself, and the image copied in.
 KIBA_PLYMOUTH_DIR="/usr/share/plymouth/themes/kibaos"
 mkdir -p "${KIBA_PLYMOUTH_DIR}"
 
 if [ -f "${BOOT_SPLASH}" ]; then
   cp "${BOOT_SPLASH}" "${KIBA_PLYMOUTH_DIR}/splash.png"
 else
-  # Fallback so the theme never references a missing image if the fetch
-  # above failed — reuse the existing 256px logo instead.
   cp /usr/share/kibaos/logo-256.png "${KIBA_PLYMOUTH_DIR}/splash.png" 2>/dev/null || true
 fi
 
@@ -3824,7 +2913,6 @@ fun display_password_callback(prompt, bullets) {
 Plymouth.SetDisplayPasswordFunction(display_password_callback);
 PLYMOUTHSCRIPT
 
-# Plymouth daemon config — must be written before mkinitcpio bakes it in
 mkdir -p /etc/plymouth
 cat > /etc/plymouth/plymouthd.conf << 'PLYMOUTHD'
 [Daemon]
@@ -3833,32 +2921,9 @@ ShowDelay=0
 DeviceTimeout=8
 PLYMOUTHD
 
-# Set the theme now so it's in place before mkarchiso runs its own
-# mkinitcpio pass over linux.preset (archiso_config=archiso.conf, set above
-# with the plymouth/kms hooks already added).
-#
-# -R forces plymouth-set-default-theme to rebuild the initramfs itself
-# right now, per ArchWiki: "every time a theme is changed, the initramfs
-# must be rebuilt -- the -R option ensures that it is rebuilt".
-#
-# Non-fatal on failure -- the underlying causes that made this fail
-# during development (missing MTD/dm_snapshot/DRM kernel config) are
-# fixed now, and the belt-and-suspenders logo overwrite right below
-# still gets the correct splash showing even if theme *selection* has a
-# hiccup, so this doesn't need to hard-stop the whole build.
 plymouth-set-default-theme -R kibaos 2>/dev/null || true
 echo "=== Boot splash: custom kibaos Plymouth theme installed ==="
 
-# Belt-and-suspenders: Arch's own `plymouth` package ships a pacman hook
-# that runs `plymouth-set-default-theme -R bgrt` automatically on every
-# install/upgrade of that package -- so if anything later in this script
-# (an AUR build, a stray `pacman -S`) touches plymouth again, the theme
-# selection above gets silently reset back to bgrt. Overwriting the
-# actual shared logo assets Arch's built-in themes read from means the
-# splash is still correctly branded even if theme *selection* ever
-# regresses -- per ArchWiki, fade-in/script/solar/spinfinity all read
-# from one shared file, and spinner/bgrt each read their own
-# watermark.png.
 cp "${KIBA_PLYMOUTH_DIR}/splash.png" /usr/share/plymouth/arch-logo.png
 for _theme_dir in bgrt spinner; do
   if [ -d "/usr/share/plymouth/themes/${_theme_dir}" ]; then
@@ -3867,22 +2932,6 @@ for _theme_dir in bgrt spinner; do
   fi
 done
 
-# ══════════════════════════════════════════════════════════════════════════
-# ICON THEME — Numix Circle (github.com/numixproject/numix-icon-theme-circle)
-# ══════════════════════════════════════════════════════════════════════════
-# Unlike the Plymouth theme, this repo ships no Makefile/install script —
-# just the two theme directories themselves (Numix-Circle and its lighter
-# variant) — so installing it is a straight copy into /usr/share/icons.
-# There's no official Arch package either (only an AUR git package that
-# builds from this same repo); cloning directly is simpler and keeps this
-# script free of AUR/makepkg dependency resolution.
-#
-# Note: Numix Circle is an APP icon theme only — its index.theme Inherits=
-# chain falls back to the base Numix theme (and then Adwaita/hicolor) for
-# places/devices/mimetypes/actions. We're not installing the base numix-
-# icon-theme here since it wasn't asked for, so non-app icons will fall
-# back to whatever adwaita-icon-theme/hicolor already provides. Say the
-# word if you want the base theme installed too for full coverage.
 NUMIX_ICONS_BUILD="/tmp/numix-icon-theme-circle"
 rm -rf "${NUMIX_ICONS_BUILD}"
 git clone --depth 1 https://github.com/numixproject/numix-icon-theme-circle.git "${NUMIX_ICONS_BUILD}"
@@ -3892,16 +2941,6 @@ gtk-update-icon-cache -f /usr/share/icons/Numix-Circle-Light 2>/dev/null || true
 rm -rf "${NUMIX_ICONS_BUILD}"
 echo "=== Icon theme: Numix Circle installed ==="
 
-# ══════════════════════════════════════════════════════════════════════════
-# WINAPPS — vendor the repo into the image instead of curling it at
-# first-run. Same reasoning as ditching archinstall for libkibadisk: don't
-# make a fresh install's success depend on a network fetch of someone
-# else's script at the exact moment a brand-new user is going through it.
-# setup.sh from this same checkout gets run locally by
-# kibaos-winapps-firstrun later (see near kibaos-first-login below), so the
-# installed WinApps version is pinned to whatever was current at ISO build
-# time, not whatever's on main the day someone installs KibaOS.
-# ══════════════════════════════════════════════════════════════════════════
 WINAPPS_SRC="/opt/kibaos/winapps-src"
 rm -rf "${WINAPPS_SRC}"
 mkdir -p "$(dirname "${WINAPPS_SRC}")"
@@ -3909,12 +2948,6 @@ git clone --depth 1 https://github.com/winapps-org/winapps.git "${WINAPPS_SRC}"
 chmod +x "${WINAPPS_SRC}/setup.sh" "${WINAPPS_SRC}/bin/"* 2>/dev/null || true
 echo "=== WinApps: vendored $(git -C "${WINAPPS_SRC}" rev-parse --short HEAD) ==="
 
-# dockur/windows (the container image WinApps' compose.yaml runs) NATs its
-# own tap network for the Windows guest and needs the netfilter NAT modules
-# loaded on the host to do it -- per winapps-org/winapps docs/docker.md,
-# without ip_tables/iptable_nat loaded, folder sharing (and the guest's
-# network setup in general) breaks. Baking this in at build time so it's
-# just working on first boot rather than a manual post-install step.
 mkdir -p /etc/modules-load.d
 cat > /etc/modules-load.d/kibaos-winapps.conf << 'IPTABLESMODS'
 ip_tables
@@ -3922,46 +2955,16 @@ iptable_nat
 IPTABLESMODS
 echo "=== WinApps: ip_tables/iptable_nat set to load at boot ==="
 
-# ══════════════════════════════════════════════════════════════════════════
-
 flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
 
-# ══════════════════════════════════════════════════════════════════════════
-# JUNCTION — app/link chooser (re.sonny.Junction), pops up on open so the
-# user picks which installed app handles a given file/link instead of
-# silently locking to one default. Installed system-wide (--system) at
-# build time so it's present for every user account on first boot, not
-# just whichever account happens to run flatpak first.
-# ══════════════════════════════════════════════════════════════════════════
 flatpak install --system --noninteractive flathub re.sonny.Junction
 echo "=== Junction: installed via flatpak (re.sonny.Junction) ==="
 
-# ══════════════════════════════════════════════════════════════════════════
-# TASKBAR LAUNCHER ICON — replace the default Budgie Menu (start button) icon
-# ══════════════════════════════════════════════════════════════════════════
-# The Budgie Menu applet's default icon name is "start-here-symbolic"
-# (solus-project/#457). Numix-Circle is an APP icon theme only
-# (see note above) and doesn't cover the "places" category that icon lives
-# in, so the lookup falls through to adwaita-icon-theme — which means the
-# taskbar launcher button would otherwise show Adwaita's literal "GNOME
-# foot" logo, a well-known rough edge (bbs.archlinux.org/viewtopic.php?
-# id=209293) that has no place on a consumer OS.
-#
-# Uses the SAME source badge as the app-icon set and Plymouth splash (see
-# BRANDING ASSETS above, LOGO_256) rather than a generated placeholder --
-# the "start menu" button is the single most-clicked spot on the whole
-# desktop, so it should be showing the actual KibaOS mark, not a generic
-# stand-in shape. That crop is already a clean centered circular badge with
-# no wordmark, which is exactly the composition a launcher icon needs.
 ADWAITA_ICONS="/usr/share/icons/Adwaita"
 LAUNCHER_MASTER="/tmp/kibaos-launcher-icon.png"
 if [ -f "${LOGO_256}" ]; then
   cp "${LOGO_256}" "${LAUNCHER_MASTER}"
 else
-  # Defensive fallback only -- shouldn't trigger since BRANDING ASSETS
-  # above always produces LOGO_256, even in its own "fetch failed" branch
-  # (the drawn black-circle/white-'K' fallback). Kept so a future refactor
-  # of that section can't silently turn this into a hard build failure.
   magick -size 512x512 xc:none \
     -fill black -draw "circle 256,256 256,16" \
     -stroke white -strokewidth 20 -fill none -draw "circle 256,256 256,60" \
@@ -3986,14 +2989,9 @@ fi
 rm -f "${LAUNCHER_MASTER}"
 echo "=== Taskbar launcher icon: KibaOS boot-logo badge installed ==="
 
-
-# ══════════════════════════════════════════════════════════════════════════
-# GTK THEME — system-wide Adwaita-dark base + KibaOS rounded-rectangle panel override
-# ══════════════════════════════════════════════════════════════════════════
 mkdir -p /usr/share/themes/KibaOS/gtk-3.0
 mkdir -p /usr/share/themes/KibaOS/gtk-4.0
 
-# Set up GTK 3.0 settings to use KibaOS theme
 mkdir -p /etc/gtk-3.0
 cat > /etc/gtk-3.0/settings.ini << 'GTK3RC'
 [Settings]
@@ -4008,7 +3006,6 @@ gtk-xft-hintstyle=hintslight
 gtk-xft-rgba=rgb
 GTK3RC
 
-# GTK4/libadwaita apps (File Roller, Kooha, Loupe...) also default to dark
 mkdir -p /etc/gtk-4.0
 cat > /etc/gtk-4.0/settings.ini << 'GTK4RC'
 [Settings]
@@ -4016,17 +3013,13 @@ gtk-application-prefer-dark-theme=1
 gtk-icon-theme-name=Numix-Circle
 GTK4RC
 
-# QT THEME - Install KibaOS custom Qt theme
 mkdir -p /usr/share/Kvantum/KibaOS/config
 mkdir -p /usr/share/Kvantum/KibaOS/Translations
 chmod -R 755 /usr/share/Kvantum/KibaOS
 
-# Set default Kvantum theme
 echo "[General]
 Theme=KibaOS" > /etc/xdg/kvantum.kvconfig
 
-# ── GTK3 rounded-rectangle panel CSS — KibaOS's own theming, applied directly ─
-# This overrides just the Budgie panel to be a floating liquid glass rounded rectangle.
 cat > /etc/gtk-3.0/gtk.css << 'GTK3PANEL'
 /* ════════════════════════════════════════════════════════════════════════
  * KibaOS Organic Motion Language
@@ -4393,7 +3386,6 @@ window:not(:backdrop) {
 .linked > button:last-child  { border-radius: 0 10px 10px 0; }
 GTK3PANEL
 
-# ── GTK4 CSS OVERRIDE ─────────────────────────────────────────────────────
 mkdir -p /etc/gtk-4.0
 cat > /etc/gtk-4.0/gtk.css << 'GTK4CSS'
 /* KibaOS unified GTK4 override */
@@ -4519,14 +3511,6 @@ window:backdrop {
 }
 GTK4CSS
 
-# ── Disable Budgie's "built-in theme" so the KibaOS GTK CSS above actually ──
-# ── renders on the panel / Raven / menu instead of being overridden by it ──
-# Schema id corrected to the verified-real "com.solus-project.budgie-panel"
-# (hyphenated — see the panel config block below for the source citation).
-# The key itself ("enable-built-in-theme") is NOT in the confirmed manager.vala
-# const dump, so it may live on a different schema (e.g. ThemeManager) or
-# under a different name — unknown gschema-override keys are silently
-# ignored rather than harmful, so this is left in as a no-risk best effort.
 mkdir -p /usr/share/glib-2.0/schemas
 cat > /usr/share/glib-2.0/schemas/zz-kibaos-budgie.gschema.override << 'BUDGIEOVERRIDE'
 [com.solus-project.budgie-panel]
@@ -4534,23 +3518,6 @@ enable-built-in-theme=false
 BUDGIEOVERRIDE
 glib-compile-schemas /usr/share/glib-2.0/schemas/ 2>/dev/null || true
 
-# ══════════════════════════════════════════════════════════════════════════
-# GDM — branded greeter (replaces LightDM)
-# ══════════════════════════════════════════════════════════════════════════
-# GDM has neither LightDM-gtk-greeter's plain "background=" key nor
-# SDDM's QML theming API (see the dead code below, kept for reference) --
-# its login screen is just GNOME Shell running in greeter mode, themed
-# through the "gdm" dconf system db instead of a greeter-specific config
-# file. /etc/dconf/profile/gdm is what tells dconf that the "gdm" system
-# user should read the "gdm" db at all (stock gdm ships a profile
-# pointing at file-db /usr/share/gdm/greeter-dconf-defaults, which is
-# read-only from this package's own defaults -- system-db here layers
-# /etc/dconf/db/gdm.d/* on top of that instead of touching the read-only
-# file-db). background reuses org.gnome.desktop.background, same key
-# the desktop session itself uses; logo is picked up by GDM natively
-# through org.gnome.login-screen -- unlike lightdm-gtk-greeter, there
-# IS a real logo slot here, so the KibaOS mark actually shows on the
-# greeter now instead of being dropped like it was under LightDM.
 mkdir -p /etc/dconf/profile /etc/dconf/db/gdm.d
 cat > /etc/dconf/profile/gdm << 'GDMPROFILE'
 user-db:user
@@ -4574,11 +3541,6 @@ disable-user-list=false
 GDMDCONF
 dconf update
 
-# ── dead code: the old SDDM frosted-glass QML greeter ───────────────────
-# Left in place (unreferenced -- nothing installs sddm anymore, and
-# nothing points sddm.conf.d/Theme at "kibaos") purely as a reference
-# for a future lightdm-webkit2-greeter port; the QML itself has no
-# runtime target under LightDM.
 : << 'DEAD_SDDM_THEME_BLOCK'
 SDDM_THEME_DIR="/usr/share/sddm/themes/kibaos"
 mkdir -p "${SDDM_THEME_DIR}"
@@ -4836,26 +3798,6 @@ Rectangle {
 SDDMQML
 DEAD_SDDM_THEME_BLOCK
 
-# ── Wayland session — budgie-desktop-kwinwayland.desktop ────────────────
-# budgie-desktop's OWN packaged session file (budgie-desktop.desktop)
-# launches labwc -- that's not something a package swap in the pacman
-# list can change, since it's baked into the .desktop upstream ships,
-# not anything this script writes. Budgie has no supported KWin session
-# of its own (their FAQ: KWin is a maybe-someday Budgie 11 item, not
-# something 10.10 -- what this image installs -- actually has); the
-# only KWin session that exists at all is this one, straight from
-# Buddies of Budgie's own (explicitly UNSUPPORTED/experimental,
-# "no assistance" per that repo's own README) budgie-wayland-session
-# testing repo, verbatim:
-#   https://github.com/BuddiesOfBudgie/budgie-wayland-session
-#   desktop/budgie-desktop-kwinwayland.desktop
-# --exit-with-session is KWin's equivalent of labwc's "-s": start the
-# compositor, run this command as the session, exit when it exits.
-# Caveat worth knowing: Budgie's gsettings→labwc "bridge" (keyboard
-# shortcuts, touchpad, theming sync from Budgie Control Center) has no
-# KWin counterpart, so none of that syncs here -- KWin's own config
-# has to be set directly instead. See KWIN CONFIG note near the
-# top-panel CSS.
 mkdir -p /usr/share/wayland-sessions
 rm -rf /usr/share/wayland-sessions/budgie-desktop.desktop
 cat > /usr/share/wayland-sessions/budgie-desktop.desktop << 'WFSESSION'
@@ -4868,29 +3810,6 @@ Type=Application
 DesktopNames=Budgie;GNOME
 WFSESSION
 
-# labwc IS still installed -- it's a hard `depends=()` of the
-# budgie-desktop Arch package itself (confirmed straight from the
-# package's own PKGBUILD/dependency list), not something `packages.x86_64`
-# not listing it explicitly can prevent pacman from pulling in. It just
-# never gets LAUNCHED anymore, since GDM now execs the KWin session
-# above instead of budgie-desktop.desktop -- and since nothing ever
-# starts the labwc binary, nothing ever parses rc.xml or throws the
-# "Invalid action... 'command'" labnag popup from the screenshots
-# (that error is labwc's OWN startup log format complaining about its
-# own config -- it can only appear if labwc itself is the thing that
-# ran).
-#
-# What budgie-desktop ALSO ships, though, is an autostart entry
-# (/etc/xdg/autostart/org.buddiesofbudgie.labwc-bridge.desktop) that
-# unconditionally runs usr/lib/budgie-desktop/labwc_bridge.py at every
-# login regardless of which compositor is actually active -- it's what
-# was regenerating rc.xml (with the "command" vs "Execute" action-name
-# bug) fresh on every single login, which is why deleting the file
-# alone never stuck. Harmless with labwc never running (nothing reads
-# what it writes anymore), but pointless busywork every login, so mask
-# it the standard per-user XDG way: a same-filename override in skel's
-# own autostart dir with Hidden=true, which takes priority over the
-# system-wide copy in /etc/xdg/autostart/ for every new account.
 SKEL="/etc/skel"
 mkdir -p "${SKEL}/.config/autostart"
 cat > "${SKEL}/.config/autostart/org.buddiesofbudgie.labwc-bridge.desktop" << 'NOLABWCBRIDGE'
@@ -4901,6 +3820,33 @@ Exec=/bin/true
 Hidden=true
 NOLABWCBRIDGE
 rm -rf "${SKEL}/.config/budgie-desktop/labwc" 2>/dev/null || true
+
+mkdir -p /etc/xdg/labwc
+cat > /etc/xdg/labwc/rc.xml << 'LABWCRC'
+<?xml version="1.0"?>
+<labwc_config>
+  <windowRules>
+    <windowRule identifier="*nemo*desktop*">
+      <skipTaskbar>yes</skipTaskbar>
+      <skipWindowSwitcher>yes</skipWindowSwitcher>
+      <fixedPosition>yes</fixedPosition>
+      <ignoreFocusRequest>yes</ignoreFocusRequest>
+      <action name="MoveTo" x="0" y="0" />
+      <action name="ToggleAlwaysOnBottom" />
+    </windowRule>
+    <windowRule title="x-nemo-desktop*">
+      <skipTaskbar>yes</skipTaskbar>
+      <skipWindowSwitcher>yes</skipWindowSwitcher>
+      <fixedPosition>yes</fixedPosition>
+      <ignoreFocusRequest>yes</ignoreFocusRequest>
+      <action name="MoveTo" x="0" y="0" />
+      <action name="ToggleAlwaysOnBottom" />
+    </windowRule>
+  </windowRules>
+</labwc_config>
+LABWCRC
+mkdir -p "${SKEL}/.config/labwc"
+cp /etc/xdg/labwc/rc.xml "${SKEL}/.config/labwc/rc.xml"
 
 mkdir -p /etc/gdm
 cat > /etc/gdm/custom.conf << 'GDMCONF'
@@ -4921,8 +3867,6 @@ chown gdm:gdm /var/lib/gdm /var/log/gdm 2>/dev/null || true
 chmod 750 /var/lib/gdm
 cat > /usr/local/bin/kibaos-screenshot << 'SCREENSHOT'
 #!/bin/bash
-# kibaos-screenshot [region] — grabs the full screen by default, or a
-# user-selected region if "region" is passed as the first argument.
 set -euo pipefail
 OUT_DIR="$HOME/Pictures/Screenshots"
 mkdir -p "$OUT_DIR"
@@ -4941,8 +3885,6 @@ SCREENSHOT
 chmod +x /usr/local/bin/kibaos-screenshot
 cat > /usr/local/bin/kibaos-screenshot-ocr << 'SCREENSHOTOCR'
 #!/bin/bash
-# kibaos-screenshot-ocr — select a region, extract its text with Tesseract,
-# and put the text (not the image) on the clipboard.
 set -euo pipefail
 GEOM=$(slurp) || exit 0
 TMP=$(mktemp --suffix=.png -t kibaos-ocr.XXXXXX)
@@ -4962,7 +3904,6 @@ SCREENSHOTOCR
 chmod +x /usr/local/bin/kibaos-screenshot-ocr
 cat > /usr/local/bin/kibaos-apply-output-scale << 'OUTPUTSCALE'
 #!/bin/bash
-# Give the compositor a moment to enumerate outputs on cold start.
 for _ in 1 2 3 4 5; do
     wlr-randr >/tmp/.kiba-outputs 2>/dev/null && [ -s /tmp/.kiba-outputs ] && break
     sleep 1
@@ -4979,14 +3920,11 @@ apply_scale() {
     [ -n "$current_name" ] || return
     scale=1
     if [ -n "$current_mm_w" ] && [ "$current_mm_w" -gt 0 ] 2>/dev/null; then
-        # DPI = px / (mm / 25.4); compare against a 168dpi HiDPI threshold.
         dpi=$(( current_w * 254 / (current_mm_w * 10) ))
         if [ "$dpi" -ge 168 ]; then
             scale=2
         fi
     elif [ -n "$current_w" ] && [ "$current_w" -ge 3000 ] 2>/dev/null; then
-        # No physical size reported (VM, some externals) -- fall back to a
-        # plain resolution heuristic. 4K+ panels are HiDPI in practice.
         scale=2
     fi
     wlr-randr --output "$current_name" --scale "$scale" >/dev/null 2>&1
@@ -5000,13 +3938,11 @@ while IFS= read -r line; do
             current_w=""; current_h=""; current_mm_w=""; current_mm_h=""
             ;;
         *"Physical size:"*)
-            # e.g. "  Physical size: 344x194 mm"
             dims=$(printf '%s' "$line" | grep -oE '[0-9]+x[0-9]+')
             current_mm_w=${dims%x*}
             current_mm_h=${dims#*x}
             ;;
         *"current"*)
-            # e.g. "  1920x1080 px, 60.000000 Hz (current)"
             dims=$(printf '%s' "$line" | grep -oE '^[[:space:]]*[0-9]+x[0-9]+' | tr -d ' ')
             current_w=${dims%x*}
             current_h=${dims#*x}
@@ -5022,26 +3958,15 @@ OTA_BASE="https://sourceforge.net/projects/kibaos/files/ota"
 OTA_KEYRING="/etc/kibaos/ota-keyring.gpg"
 mkdir -p /etc/kibaos /var/lib/kibaos-ota /var/log/kibaos
 
-# ── Import OTA public key into dedicated keyring ───────────────────────────
 curl -fsSL --retry 3 "${OTA_PUBKEY_URL}" -o /tmp/ota-public.asc 2>/dev/null && \
   gpg --no-default-keyring --keyring "${OTA_KEYRING}" \
       --import /tmp/ota-public.asc 2>/dev/null || true
 rm -f /tmp/ota-public.asc
 
-# ── Patch-level tracking ───────────────────────────────────────────────────
 echo "0" > /etc/kibaos/patch-level
 
-# ══════════════════════════════════════════════════════════════════════════
-# /usr/local/bin/kibaos-ota — the live patching engine
-# ══════════════════════════════════════════════════════════════════════════
 cat > /usr/local/bin/kibaos-ota << 'OTASCRIPT'
 #!/usr/bin/env bash
-# KibaOS OTA Live Patch Engine
-# Silently downloads, verifies, and applies file-level patches.
-# Handles display manager restarts with a framebuffer freeze trick.
-# Runs as root via systemd timer — never visible to the user. Also
-# callable directly as `kibaos-ota rollback --reason "..."` (see the
-# CLI ROLLBACK section below) to undo the most recent patch.
 
 set -euo pipefail
 
@@ -5054,29 +3979,19 @@ FREEZE_PID_FILE="/tmp/kibaos-fb-freeze.pid"
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >> "${OTA_LOG}"; }
 
-# ══════════════════════════════════════════════════════════════════════════
-# FRAMEBUFFER FREEZE — makes display restarts invisible to the user
-# ══════════════════════════════════════════════════════════════════════════
 fb_freeze() {
   log "Freezing display with framebuffer snapshot..."
-  # Capture current screen with grim (Wayland screenshot)
   SNAP="/tmp/kibaos-ota-snap.png"
   SNAP_RAW="/tmp/kibaos-ota-snap.raw"
   WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}"
   XDG_RUNTIME_DIR="/run/user/1000"
 
-  # Take screenshot as liveuser. (This script runs at real boot time on the
-  # installed system, not inside the nosuid build chroot, so sudo would
-  # actually work here — using runuser anyway for consistency, since this
-  # script is also always invoked as root and runuser is the more direct
-  # tool for "run as a different user" with no escalation step needed.)
   runuser -u liveuser -- env \
     WAYLAND_DISPLAY="${WAYLAND_DISPLAY}" \
     XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR}" \
     grim "${SNAP}" 2>/dev/null || true
 
   if [ -f "${SNAP}" ]; then
-    # Convert to raw framebuffer format and write to /dev/fb0
     FB_WIDTH=$(cat /sys/class/graphics/fb0/virtual_size 2>/dev/null | cut -d',' -f1 || echo 1920)
     FB_HEIGHT=$(cat /sys/class/graphics/fb0/virtual_size 2>/dev/null | cut -d',' -f2 || echo 1080)
     magick "${SNAP}" -resize "${FB_WIDTH}x${FB_HEIGHT}!" \
@@ -5086,8 +4001,7 @@ fb_freeze() {
     fi
   fi
 
-  # Emulate mouse movement via uinput to keep cursor alive
-  python3 - << 'UINPUT_WIGGLE'
+  python3 - << 'UINPUT_WIGGLE' &
 import struct, time, os, fcntl
 
 EV_REL, REL_X, REL_Y = 0x02, 0x00, 0x01
@@ -5111,7 +4025,6 @@ try:
     dev = dev.ljust(UINPUT_DEV_SZ, b'\x00')
     fd.write(dev)
     fcntl.ioctl(fd, UI_DEV_CREATE)
-    # Wiggle cursor gently every 500ms for up to 30s
     for _ in range(60):
         emit(fd, EV_REL, REL_X,  1)
         emit(fd, EV_SYN, SYN_REPORT, 0)
@@ -5124,7 +4037,6 @@ try:
 except Exception:
     pass
 UINPUT_WIGGLE
-  &
   echo $! > "${FREEZE_PID_FILE}"
   log "Framebuffer freeze active (PID $(cat ${FREEZE_PID_FILE}))."
 }
@@ -5138,9 +4050,6 @@ fb_unfreeze() {
   log "Framebuffer freeze released."
 }
 
-# ══════════════════════════════════════════════════════════════════════════
-# APPLY PATCH — atomic file-by-file replacement
-# ══════════════════════════════════════════════════════════════════════════
 apply_patch() {
   log "Applying patch ${LATEST}..."
   ROLLBACK_DIR="${OTA_WORKDIR}/rollback-${CURRENT}"
@@ -5153,14 +4062,12 @@ apply_patch() {
 
     [ -f "${SRC}" ] || continue
 
-    # Back up existing file for rollback
     if [ -f "${DST}" ]; then
       BACKUP_PATH="${ROLLBACK_DIR}/${FILEPATH}"
       mkdir -p "$(dirname ${BACKUP_PATH})"
       cp -a "${DST}" "${BACKUP_PATH}"
     fi
 
-    # Atomic replace: write to .ota-tmp then move
     mkdir -p "$(dirname ${DST})"
     cp -a "${SRC}" "${DST}.ota-tmp"
     mv "${DST}.ota-tmp" "${DST}"
@@ -5186,14 +4093,6 @@ rollback_patch() {
   fi
 }
 
-# ── Restart compositor: full session bounce, not in-place reconfigure ─────
-# KWin does expose a documented reconfigure signal (`qdbus org.kde.KWin
-# /KWin reconfigure`), but it only reloads kwinrc/effects settings, not
-# things like a display-server-level renderer swap — so, same call the
-# labwc build used to make for the same reason before the switch to KWin,
-# this restarts the whole greeter/session rather than gambling on an
-# in-place reload inside an unattended OTA patcher. Slower, but it won't
-# leave the user stuck on a half-reloaded compositor.
 restart_compositor() {
   log "Restarting session..."
   systemctl restart gdm 2>/dev/null || \
@@ -5203,12 +4102,9 @@ restart_compositor() {
   log "Session restarted."
 }
 
-
-# ── Restart display manager silently if needed ────────────────────────────
 restart_display_manager() {
   log "Restarting GDM..."
   systemctl restart gdm
-  # Wait for Wayland socket to come back
   for i in $(seq 1 20); do
     [ -S "/run/user/1000/${WAYLAND_DISPLAY:-wayland-0}" ] && break
     sleep 0.5
@@ -5216,33 +4112,19 @@ restart_display_manager() {
   log "GDM restarted."
 }
 
-# ── Post-patch hooks ───────────────────────────────────────────────────────
 run_post_hooks() {
   log "Running post-patch hooks..."
-  # Re-apply GTK icon cache if icons changed
   grep -q 'usr/share/icons' "${MANIFEST}" && \
     gtk-update-icon-cache /usr/share/icons/hicolor/ 2>/dev/null || true
-  # Recompile GLib schemas if any changed
   grep -q 'usr/share/glib-2.0/schemas' "${MANIFEST}" && \
     glib-compile-schemas /usr/share/glib-2.0/schemas/ 2>/dev/null || true
-  # Update MIME database if mime packages changed
   grep -q 'usr/share/mime' "${MANIFEST}" && \
     update-mime-database /usr/share/mime 2>/dev/null || true
-  # Reload systemd units if any changed
   grep -q 'usr/lib/systemd' "${MANIFEST}" && \
     systemctl daemon-reload 2>/dev/null || true
   log "Post-patch hooks complete."
 }
 
-# ══════════════════════════════════════════════════════════════════════════
-# CLI ROLLBACK — `kibaos-ota rollback --reason "..."`
-# ══════════════════════════════════════════════════════════════════════════
-# This is the manual entry point for anything that wants to trigger a
-# rollback directly. It's independent of the unattended timer flow below: the timer
-# always invokes this script bare, with no arguments, and never hits this
-# branch. Restores whatever the most recent applied patch overwrote, from
-# the backup apply_patch() kept alongside it — there's nothing to undo if
-# no patch has landed yet, so that's reported rather than silently no-op'd.
 if [ "${1:-}" = "rollback" ]; then
   shift || true
   REASON="cli:unspecified"
@@ -5268,11 +4150,9 @@ if [ "${1:-}" = "rollback" ]; then
   fi
 fi
 
-# ── Check current patch level ──────────────────────────────────────────────
 CURRENT=$(cat "${PATCH_LEVEL_FILE}" 2>/dev/null || echo 0)
 log "Current patch level: ${CURRENT}"
 
-# ── Fetch latest available patch level ────────────────────────────────────
 LATEST=$(curl -fsSL --retry 3 --max-time 10 \
   "${OTA_BASE}/latest-patch-level" 2>/dev/null | tr -d '[:space:]') || {
   log "Could not reach OTA server. Skipping."
@@ -5291,11 +4171,6 @@ fi
 
 log "New patch available: ${CURRENT} → ${LATEST}"
 
-# ── Download patch bundle + signature ─────────────────────────────────────
-# patches are tagged per-arch now -- some patched components are compiled
-# binaries, not scripts, so an untagged tarball could hand an arm box an
-# x86 binary and that's a very bad day. DEV_ARCH comes from uname at download time so
-# this stays correct forever, even if a device gets re-imaged later. beep boop
 DEV_ARCH="$(uname -m)"
 PATCH_TAR="${OTA_WORKDIR}/kibaos-ota-${LATEST}-${DEV_ARCH}.tar.gz"
 PATCH_SIG="${PATCH_TAR}.asc"
@@ -5322,7 +4197,6 @@ curl -fsSL --retry 3 --max-time 30 \
   exit 1
 }
 
-# ── Verify GPG signature ───────────────────────────────────────────────────
 log "Verifying signature..."
 if ! gpg --no-default-keyring --keyring "${OTA_KEYRING}" \
          --verify "${PATCH_SIG}" "${PATCH_TAR}" 2>/dev/null; then
@@ -5332,14 +4206,12 @@ if ! gpg --no-default-keyring --keyring "${OTA_KEYRING}" \
 fi
 log "Signature verified."
 
-# ── Verify SHA256 checksums from manifest ─────────────────────────────────
 log "Verifying checksums..."
 EXTRACT_DIR="${OTA_WORKDIR}/patch-${LATEST}"
 rm -rf "${EXTRACT_DIR}"
 mkdir -p "${EXTRACT_DIR}"
 tar xzf "${PATCH_TAR}" -C "${EXTRACT_DIR}"
 
-# manifest format: SHA256  ./path/to/file
 while IFS= read -r line; do
   EXPECTED_HASH=$(echo "${line}" | awk '{print $1}')
   FILEPATH=$(echo "${line}" | awk '{print $2}' | sed 's|^\./||')
@@ -5352,7 +4224,6 @@ while IFS= read -r line; do
 done < "${MANIFEST}"
 log "All checksums verified."
 
-# ── Detect whether patch touches display-critical files ───────────────────
 NEEDS_DISPLAY_RESTART=false
 NEEDS_COMPOSITOR_RESTART=false
 while IFS= read -r line; do
@@ -5361,26 +4232,14 @@ while IFS= read -r line; do
     etc/gdm*|usr/lib/gdm*|usr/bin/gdm*|usr/share/gdm*|etc/dconf/db/gdm.d*)
       NEEDS_DISPLAY_RESTART=true ;;
     usr/bin/labwc*)
-      # kwinrc/autostart/environment all live per-user under
-      # ~/.config, seeded from /etc/skel at account creation, same
-      # story labwc's rc.xml used to have. An OTA patch to the
-      # skel copy only affects NEWLY created users from that point on --
-      # it can't retroactively update already-installed users' own
-      # configs. Only the kwin binary itself triggers a restart here.
       NEEDS_COMPOSITOR_RESTART=true ;;
   esac
 done < "${MANIFEST}"
 
-# ══════════════════════════════════════════════════════════════════════════
-# MAIN EXECUTION
-# ══════════════════════════════════════════════════════════════════════════
-
-# Freeze display if we're going to restart anything visible
 if ${NEEDS_DISPLAY_RESTART} || ${NEEDS_COMPOSITOR_RESTART}; then
   fb_freeze
 fi
 
-# Apply patch with rollback on failure
 if ! apply_patch; then
   log "Patch application failed. Initiating rollback."
   rollback_patch
@@ -5388,7 +4247,6 @@ if ! apply_patch; then
   exit 1
 fi
 
-# Run post-patch hooks
 if ! run_post_hooks; then
   log "Post-patch hooks failed. Initiating rollback."
   rollback_patch
@@ -5396,30 +4254,39 @@ if ! run_post_hooks; then
   exit 1
 fi
 
-# Restart services as needed
-if ${NEEDS_COMPOSITOR_RESTART}; then
-  restart_compositor
-fi
-if ${NEEDS_DISPLAY_RESTART}; then
-  restart_display_manager
+echo "${LATEST}" > "${PATCH_LEVEL_FILE}"
+
+_active_user_session() {
+  loginctl list-sessions --no-legend 2>/dev/null | while read -r _sid _uid _user _rest; do
+    [ "${_user}" = "gdm" ] && continue
+    [ "$(loginctl show-session "${_sid}" -p Class --value 2>/dev/null)" = "user" ] && \
+    [ "$(loginctl show-session "${_sid}" -p Active --value 2>/dev/null)" = "yes" ] && { echo yes; break; }
+  done
+}
+if [ -n "$(_active_user_session)" ]; then
+  log "User session is active -- deferring session restart until next login/boot."
+  mkdir -p "${OTA_WORKDIR}"
+  touch "${OTA_WORKDIR}/restart-deferred"
+else
+  if ${NEEDS_COMPOSITOR_RESTART}; then
+    restart_compositor
+  fi
+  if ${NEEDS_DISPLAY_RESTART}; then
+    restart_display_manager
+  fi
 fi
 
-# Unfreeze display
 if ${NEEDS_DISPLAY_RESTART} || ${NEEDS_COMPOSITOR_RESTART}; then
   fb_unfreeze
 fi
 
-# Commit new patch level
-echo "${LATEST}" > "${PATCH_LEVEL_FILE}"
 log "Successfully updated to patch level ${LATEST}."
 
-# Cleanup
 rm -rf "${EXTRACT_DIR}" "${PATCH_TAR}" "${PATCH_SIG}" "${MANIFEST}"
 log "Done."
 OTASCRIPT
 chmod +x /usr/local/bin/kibaos-ota
 
-# ── systemd service + timer for OTA ───────────────────────────────────────
 cat > /etc/systemd/system/kibaos-ota.service << 'OTASVC'
 [Unit]
 Description=KibaOS OTA Live Patch Engine
@@ -5449,16 +4316,6 @@ OTATIMER
 
 systemctl enable kibaos-ota.timer
 
-# ══════════════════════════════════════════════════════════════════════════
-# FIRST-BOOT GROUP CATCHUP
-# The installer defers any -G group that doesn't exist yet at install time
-# (docker is the known case: its group only shows up once systemd-sysusers
-# actually runs against the installed system, not the image-capture
-# snapshot) and records it in /etc/kibaos/pending-user-groups as
-# "username:group1,group2". This runs after sysusers on first boot, adds
-# the user to whatever's now available, and cleans up after itself so it's
-# a no-op on every boot after the first.
-# ══════════════════════════════════════════════════════════════════════════
 cat > /usr/local/bin/kibaos-firstboot-groups << 'FIRSTBOOTGROUPS'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -5484,9 +4341,6 @@ while IFS=: read -r username groups; do
     fi
 done < "$MARKER"
 
-# Only remove the marker once every listed group actually got processed --
-# if getent still couldn't find something, leave the file so the next boot
-# retries it instead of silently dropping that membership forever.
 if ! grep -qE ':.*[a-zA-Z]' "$MARKER" 2>/dev/null || \
    ! awk -F: '{print $2}' "$MARKER" | tr ',' '\n' | while read -r g; do
        [ -n "$g" ] && ! getent group "$g" > /dev/null 2>&1 && exit 1
@@ -5516,9 +4370,6 @@ FIRSTBOOTSVC
 
 systemctl enable kibaos-firstboot-groups.service
 
-# ══════════════════════════════════════════════════════════════════════════
-# SKELETON
-# ══════════════════════════════════════════════════════════════════════════
 SKEL="/etc/skel"
 mkdir -p \
   "${SKEL}/.config/gtk-3.0" \
@@ -5561,9 +4412,6 @@ panels=@as []
 EOF
 glib-compile-schemas /usr/share/glib-2.0/schemas/
 
-# ══════════════════════════════════════════════════════════════════════════
-# FIRST-LOGIN SCRIPT
-# ══════════════════════════════════════════════════════════════════════════
 cat > /usr/local/bin/kibaos-first-login << 'FIRSTLOGIN'
 #!/usr/bin/env bash
 STAMP="${HOME}/.config/.kibaos-configured"
@@ -5609,42 +4457,6 @@ touch "${STAMP}"
 FIRSTLOGIN
 chmod +x /usr/local/bin/kibaos-first-login
 
-# ══════════════════════════════════════════════════════════════════════════
-# PANEL GUARD -- runs every login, not just the first
-# ══════════════════════════════════════════════════════════════════════════
-# The panel setup used to live in kibaos-first-login above, one-shot and
-# stamp-guarded like everything else there. That's fine for preferences
-# (theme, wallpaper, workspace count) -- if those are wrong, at worst you
-# reset them yourself. Panels are different: on more than one report, a
-# freshly-configured install came back on the *second* login with a bare
-# top panel and no bottom dock at all, i.e. exactly Budgie's own built-in
-# fallback layout, not ours.
-#
-# Root cause, straight from budgie-desktop's own manager.vala
-# (BuddiesOfBudgie/budgie-desktop, src/panel/manager.vala): panel startup
-# calls load_panels(), and only calls create_default(default_layout) --
-# Budgie's own stock single-panel layout -- if that load comes back empty.
-# There's also do_live_reset(), a *separate* path that fires on a failed
-# load *after* panels were already loaded once: it deletes every panel
-# and dconf-resets the whole panels tree before falling back to that same
-# default. Budgie's icon-tasklist applet is the documented trigger for
-# exactly that (solus-project/budgie-desktop#1480: a pinned-launchers
-# entry pointing at a .desktop file that doesn't exist crashes the panel
-# on load) -- the find_desktop_id() probe below already guards the .desktop
-# IDs actually written into pinned-launchers, but nothing guarantees every
-# one of those apps' indexing is settled at the exact moment panel load
-# happens on every future boot, only that it was at the moment this script
-# last ran. If a crash-and-reset ever fires, dconf keeps whatever default
-# layout Budgie fell back to -- and a one-shot, stamp-guarded fix has
-# already run and will never touch it again.
-#
-# So: no stamp here. Cheap check, every login -- if a bottom panel already
-# exists, do nothing at all (this is the common case, pure no-op). Only
-# if one doesn't -- first login ever, or Budgie wiped it out from under
-# us since -- does this actually rebuild anything. Whatever stray
-# panel/applet UUIDs Budgie's own fallback left behind just go unreferenced
-# in dconf; harmless, and simpler than trying to hunt them down and clean
-# them up.
 cat > /usr/local/bin/kibaos-panel-guard << 'PANELGUARD'
 #!/usr/bin/env bash
 PANEL_SCHEMA="com.solus-project.budgie-panel"
@@ -5657,9 +4469,6 @@ for uuid in ${EXISTING_UUIDS}; do
   [ "${loc}" = "'bottom'" ] && exit 0
 done
 
-# No bottom panel found -- either nothing's been configured yet, or
-# Budgie's own load-failure recovery reset things since we last ran.
-# Rebuild it from scratch; see the comment above this script for why.
 PANEL_UUID=$(uuidgen)
 gsettings set "${PANEL_SCHEMA}" panels "['${PANEL_UUID}']"
 PANEL_PATH="${PANEL_BASE}{${PANEL_UUID}}/"
@@ -5669,12 +4478,6 @@ gsettings set "${PANEL_INSTANCE_SCHEMA}:${PANEL_PATH}" size 42
 gsettings set "${PANEL_INSTANCE_SCHEMA}:${PANEL_PATH}" transparency none
 gsettings set "${PANEL_INSTANCE_SCHEMA}:${PANEL_PATH}" enable-shadow true
 
-# Budgie's icon-tasklist applet will PERMANENTLY crash the session on
-# every future login if pinned-launchers points at a .desktop file that
-# doesn't actually exist (solus-project/budgie-desktop#1480 — confirmed
-# this happens, not a maybe). so: probe the real filesystem for whichever
-# desktop-id variant actually got installed, instead of hardcoding a
-# guess and hoping it's right.
 find_desktop_id() {
   for candidate in "$@"; do
     [ -f "/usr/share/applications/${candidate}" ] && {
@@ -5714,10 +4517,6 @@ MENU_UUID=$(add_applet "budgie-menu")
 TASKLIST_UUID=$(add_applet "icon-tasklist")
 CLOCK_UUID=$(add_applet "clock")
 
-# Raven trigger (opens the Raven notification/quick-settings sidebar) is
-# built into budgie-desktop (module raventriggerapplet). VisualSpace comes
-# from budgie-extras -- probed for on disk first so a missing plugin can
-# never leave a dangling applet entry in the panel layout.
 RAVEN_UUID=$(add_applet "raventriggerapplet")
 APPLET_LIST="'${MENU_UUID}', '${TASKLIST_UUID}'"
 if ls /usr/lib/budgie-desktop/plugins/visualspace/visualspace.so \
@@ -5752,10 +4551,6 @@ NoDisplay=true
 X-GNOME-Autostart-enabled=true
 AUTOCFG
 
-# No Hidden/marker-file gate here on purpose -- unlike kibaos-configure.desktop
-# above, this one is meant to run every single login (see the comment on
-# kibaos-panel-guard itself for why); it self-limits via the bottom-panel
-# check inside the script instead, not via autostart-once semantics.
 cat > "${SKEL}/.config/autostart/kibaos-panel-guard.desktop" << 'PANELGUARDDESK'
 [Desktop Entry]
 Type=Application
@@ -5766,13 +4561,6 @@ NoDisplay=true
 X-GNOME-Autostart-enabled=true
 PANELGUARDDESK
 
-# ── OEM-mode autostart: launches io.kibaos.oobe (which self-detects
-# OEM-finish mode via /etc/kibaos/oem-pending, see main.vala) on login to
-# the temporary 'oem' autologin account kibaos-oem-prepare sets up. a
-# plain Exec= can't conditionally skip launching, so the condition gets
-# wrapped in a one-line shell test instead — on a normal (non-OEM)
-# install this marker never exists, so the test just fails and nothing
-# launches. ───────────────────────────────────────────────────────────
 cat > "${SKEL}/.config/autostart/kibaos-oem-finish.desktop" << 'OEMAUTOCFG'
 [Desktop Entry]
 Type=Application
@@ -5783,37 +4571,12 @@ NoDisplay=false
 X-GNOME-Autostart-enabled=true
 OEMAUTOCFG
 
-# ══════════════════════════════════════════════════════════════════════════
-# WINDOWS APP SUPPORT (WinApps) — file-manager integration + first-login
-# setup wizard. Package deps (docker, freerdp, dialog, zenity, pciutils,
-# etc.) are in packages.x86_64; the winapps-org/winapps repo itself is
-# vendored above at ${WINAPPS_SRC}. Both the disk installer
-# (kibaos-oobe-backend) and OEM-finish (kibaos-oem-finish.sh) always drop
-# /etc/kibaos/winapps-pending on completion — this is a listed, always-on
-# feature, not opt-in, so unlike the oem-pending marker it mirrors, nothing
-# ever leaves it unset. The marker's what triggers kibaos-winapps-setup on
-# first login (see kibaos-winapps-firstrun.desktop below); the user can
-# also launch it manually via "Set Up Windows Workspace" in the app menu
-# any time, e.g. to retry after a failed first attempt.
-# ══════════════════════════════════════════════════════════════════════════
-
-# A KibaOS-branded icon for the exe-runner + app-menu entry, pulled from the
-# vendored repo's own installer art instead of drawing something new.
 install -Dm644 "${WINAPPS_SRC}/install/windows.svg" \
   /usr/share/icons/hicolor/scalable/apps/kibaos-winapps.svg 2>/dev/null || true
 gtk-update-icon-cache -f /usr/share/icons/hicolor 2>/dev/null || true
 
-# ── The Windows workspace launcher ──────────────────────────────────────
-# Rather than routing individual .exe files through WinApps' RAIL
-# integration, this opens the whole Windows environment as one fullscreen
-# workspace via its noVNC web console -- simpler mental model for the
-# person (one window called "Windows", not per-app RDP plumbing) and
-# avoids RAIL edge cases with apps WinApps didn't detect/configure.
 cat > /usr/local/bin/kibaos-winapps-workspace << 'WORKSPACE'
 #!/bin/bash
-# Opens the Windows VM's noVNC console fullscreen. If setup hasn't run
-# yet, offers to run it first instead of just opening a browser tab to
-# nothing -- same "never dead-end without explanation" rule as before.
 CONF_DIR="${HOME}/.config/winapps"
 COMPOSE_FILE="${CONF_DIR}/compose.yaml"
 KWIN_SCRIPT_NAME="kibaos-winapps-workspace-tempbind"
@@ -5827,30 +4590,13 @@ if [ ! -f "${COMPOSE_FILE}" ]; then
     --text="Windows Workspace lets you run Windows programs -- like Word, Excel, or other apps that don't have a Linux version -- right alongside everything else in KibaOS.\n\nWant to set it up now? It takes about 15–20 minutes, and you won't need to do anything but wait." \
     --ok-label="Yes, Let's Do It" --cancel-label="Maybe Later" 2>/dev/null
   if [ "$?" -eq 0 ]; then
-    # io.kibaos.winapps-setup, not the raw backend script -- it's the GTK
-    # wrapper that actually reads the PROGRESS/FATAL protocol and shows
-    # something on screen while kibaos-winapps-setup runs headless behind
-    # it (see WINDOWS APP SUPPORT further down for both).
     exec /usr/bin/io.kibaos.winapps-setup --manual-launch
   fi
   exit 1
 fi
 
-# ── Single-instance guard ────────────────────────────────────────────────
-# Clicking the desktop icon a second time while the workspace is already
-# open used to spin up a second chromium --kiosk window and re-run
-# `docker compose up` (harmless, but pointless and slow) instead of just
-# getting the person back to the window they already have. xdotool is
-# already vendored for this workspace launcher's own single-instance
-# guard below, so this reuses it rather than adding a new dependency:
-# search for a window whose class matches
-# chromium's --app= kiosk instance, and if one exists, just raise/focus
-# it and exit immediately -- no compose, no pkexec, no wait, no chromium
-# relaunch.
 EXISTING_WIN="$(xdotool search --class "^chromium.*8006$|^Chromium.*8006$" 2>/dev/null | head -n1)"
 if [ -z "${EXISTING_WIN}" ]; then
-  # --app= windows aren't always classed by URL depending on chromium
-  # version -- fall back to matching by window name instead.
   EXISTING_WIN="$(xdotool search --name "localhost:8006" 2>/dev/null | head -n1)"
 fi
 if [ -n "${EXISTING_WIN}" ]; then
@@ -5860,13 +4606,6 @@ fi
 
 KEYBIND_ADDED=0
 add_keybind() {
-  # Super+K minimizes the fullscreen Windows window back to the desktop --
-  # bound only while this workspace is actually open, not a permanent
-  # shortcut. KWin has no rc.xml to patch, so this registers a throwaway
-  # KWin script over D-Bus instead: the script calls registerShortcut()
-  # for Meta+K and minimizes whatever window is currently active, and
-  # gets unloaded again on exit (see cleanup() below) rather than left
-  # bound forever.
   if [ ! -f "${KWIN_SCRIPT_ID_FILE}" ]; then
     cat > "${KWIN_SCRIPT_FILE}" << 'KWINTEMPBIND'
 registerShortcut("KibaWinAppsWorkspaceMinimize", "Minimize Windows Workspace", "Meta+K", function() {
@@ -5885,10 +4624,6 @@ KWINTEMPBIND
   fi
 }
 
-# Runs on ANY exit from this point on -- normal chromium close, the user
-# killing the window some other way, or this script itself dying. Without
-# a trap, only the "chromium closed normally" path unloaded the script,
-# so a killed session could permanently leave Super+K bound to minimize.
 cleanup() {
   if [ "${KEYBIND_ADDED}" -eq 1 ] && [ -f "${KWIN_SCRIPT_ID_FILE}" ]; then
     SCRIPT_ID="$(cat "${KWIN_SCRIPT_ID_FILE}" 2>/dev/null)"
@@ -5900,42 +4635,15 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# ── Skip the auth prompt when it's already running ─────────────────────
-# `pkexec docker compose up -d` used to run unconditionally on every
-# launch -- idempotent, sure, but that still means a polkit password
-# prompt every single time someone reopens the workspace, even when the
-# container's been sitting there running the whole time (e.g. they
-# minimized with Super+K, closed the window some other way, then clicked
-# the icon again a minute later). Checking whether noVNC is already
-# answering first means the extremely common "it's already up" case
-# skips pkexec, docker compose, and the progress dialog entirely and
-# goes straight to reopening chromium.
 ALREADY_UP=0
 if curl -fsS -o /dev/null --max-time 2 "${WIN_URL}" 2>/dev/null; then
   ALREADY_UP=1
 fi
 
 if [ "${ALREADY_UP}" -eq 0 ]; then
-  # docker compose up is idempotent -- safe to run even if the container's
-  # already up (e.g. the curl check above raced a container that was
-  # still finishing its own startup), and covers the case where it's
-  # stopped since last boot. Runs in the background so the "starting up"
-  # dialog below can show right away instead of the whole launch
-  # appearing to hang on the pkexec prompt.
   ( cd "${CONF_DIR}" && pkexec docker compose up -d ) >/dev/null 2>&1 &
   COMPOSE_PID=$!
 
-  # The container can take a few seconds (or longer, first boot after a
-  # reboot) before noVNC is actually answering on 8006. Opening chromium
-  # immediately used to race that -- landing the person on a browser
-  # "connection refused" page with no explanation, which looks broken even
-  # though nothing's actually wrong. Wait for a real HTTP response rather
-  # than just the TCP port accepting a connection -- noVNC's port can
-  # start accepting TCP connections slightly before it's actually serving
-  # the console page, which was still enough to show a half-loaded blank
-  # page for a moment. A visible, cancellable progress dialog stays on
-  # screen the whole time either way, so there's always something on
-  # screen that makes sense.
   (
     for i in $(seq 1 60); do
       curl -fsS -o /dev/null --max-time 1 "${WIN_URL}" 2>/dev/null && break
@@ -5963,9 +4671,6 @@ fi
 
 add_keybind
 
-# First time this workspace opens on this account, say what Super+K does
-# up front -- it's the only way out of a fullscreen kiosk window, and
-# nothing else on screen hints it exists.
 if [ "${KEYBIND_ADDED}" -eq 1 ] && [ ! -f "${HINT_MARKER}" ]; then
   mkdir -p "$(dirname "${HINT_MARKER}")"
   touch "${HINT_MARKER}"
@@ -5976,7 +4681,6 @@ if [ "${KEYBIND_ADDED}" -eq 1 ] && [ ! -f "${HINT_MARKER}" ]; then
 fi
 
 chromium --kiosk --app="${WIN_URL}" 2>/dev/null
-# cleanup() runs automatically via the EXIT trap above.
 WORKSPACE
 chmod +x /usr/local/bin/kibaos-winapps-workspace
 
@@ -5992,41 +4696,11 @@ NoDisplay=false
 Categories=System;
 WORKSPACEDESKTOP
 
-# Also drop it as a desktop icon, not just an app-menu entry -- this is
-# meant to be the person's main "open Windows" door, so it should be
-# reachable without digging into the menu. Written into skel so it lands
-# on every new account's desktop, same as the rest of this section.
 mkdir -p "${SKEL}/Desktop"
 cp /usr/share/applications/kibaos-winapps-workspace.desktop \
   "${SKEL}/Desktop/kibaos-winapps-workspace.desktop"
 chmod +x "${SKEL}/Desktop/kibaos-winapps-workspace.desktop"
 
-# ── The setup wizard itself ─────────────────────────────────────────────
-# Written entirely in plain language on purpose — this is the one part of
-# KibaOS setup that talks about Docker, RDP ports, and VMs under the
-# hood, none of which the person running it should ever need to know.
-# Re-runnable: launching it again after a successful setup just re-opens
-# the "everything's already working" summary instead of redoing anything.
-# ── The setup wizard itself ─────────────────────────────────────────────
-# Written entirely in plain language on purpose — this is the one part of
-# KibaOS setup that talks about Docker, RDP ports, and VMs under the
-# hood, none of which the person running it should ever need to know.
-# Re-runnable: launching it again after a successful setup just re-opens
-# the "everything's already working" summary instead of redoing anything.
-#
-# Headless PROGRESS/FATAL backend, not a dialog-driven script. This used
-# to talk straight to the person via zenity --info/--question/--error/
-# --progress, which meant it could only ever run inside an X session with
-# zenity installed, and had no way to hand its status to anything other
-# than a zenity window. It now speaks the exact same wire protocol as
-# kibaos-oobe-backend and kibaos-oem-finish.sh instead: "PROGRESS <pct>
-# <msg>" lines on stdout, "FATAL: <msg>" on stderr, plain exit code for
-# success/failure. See launch_backend()/read_backend_output() in the OOBE
-# frontend above for the reference reader -- any caller that spawns this
-# with stdout piped and stderr merged (GLib.SubprocessLauncher with
-# STDOUT_PIPE|STDERR_MERGE, same as the OOBE launcher does) can drive its
-# own UI off these two prefixes, or none at all. No zenity calls remain
-# anywhere in this script.
 cat > /usr/local/bin/kibaos-winapps-setup << 'WINAPPSSETUP'
 WINAPPS_SRC="/opt/kibaos/winapps-src"
 CONF_DIR="${HOME}/.config/winapps"
@@ -6037,27 +4711,10 @@ MANUAL_LAUNCH="${1:-}"
 progress() { echo "PROGRESS $1 $2"; }
 fail()     { progress 100 "Setup failed: $1"; echo "FATAL: $1" >&2; exit 1; }
 
-# Group membership in /etc/group only takes effect for *new* login
-# sessions, not the one you're already in -- and the OEM-finish flow in
-# particular can land someone straight into a desktop session for the
-# account that was *just* created, marker and all, with docker group
-# membership on disk but not yet in this session's token. Rather than
-# make the user log out and back in for what looks like a broken feature,
-# re-exec once with the docker group active (see below) if the account
-# is a docker-group member on disk but this shell doesn't have it active
-# yet. WINAPPS_REGROUPED guards against ever doing this twice.
 if [ -z "${WINAPPS_REGROUPED:-}" ] \
    && id -nG "${USER:-$(id -un)}" 2>/dev/null | tr ' ' '\n' | grep -qx docker \
    && ! groups 2>/dev/null | tr ' ' '\n' | grep -qx docker; then
   export WINAPPS_REGROUPED=1
-  # `sg` (which used to do this in one shot, no TTY required) no longer
-  # ships on Arch -- it's gone from both `shadow` and `util-linux` as of
-  # current package file lists, `newgrp` is util-linux's now. `newgrp`
-  # normally replaces the shell interactively, but feeding it a command
-  # over stdin (rather than a TTY) makes it run that command
-  # non-interactively in the new group and then exit, which is the
-  # standard script idiom for this. `exec` here still replaces this
-  # process rather than nesting another layer of shell.
   exec newgrp docker <<NEWGRPCMD
 "$0" ${MANUAL_LAUNCH}
 NEWGRPCMD
@@ -6065,30 +4722,17 @@ fi
 
 progress 1 "Checking Windows Workspace status..."
 
-# Already fully set up? Report done and clear the marker instead of
-# redoing anything -- this is a normal outcome, not a failure.
 if command -v winapps >/dev/null 2>&1 && [ -f "${CONF_DIR}/winapps.conf" ]; then
   rm -f "${MARKER}"
   progress 100 "Windows Workspace is already set up and running."
   exit 0
 fi
 
-# Docker already installed and the Windows container already created from
-# a prior attempt (compose.yaml exists), just not finished (setup.sh
-# never completed, or the RDP wait timed out last time)? That means
-# someone already went through this once -- resume instead of restarting
-# from scratch.
 RESUMING=0
 if command -v docker >/dev/null 2>&1 && [ -f "${COMPOSE_FILE}" ]; then
   RESUMING=1
 fi
 
-# WinApps is a listed, always-on KibaOS feature, not an opt-in add-on
-# (see the WINDOWS APP SUPPORT header above), so this proceeds straight
-# through rather than gating on a confirmation dialog for something
-# that's not actually optional. kibaos-winapps-workspace's own "want to
-# set this up now?" question, before it ever launches this backend, is
-# the one and only consent point.
 if [ "${RESUMING}" -eq 1 ]; then
   progress 5 "Resuming Windows Workspace setup..."
 else
@@ -6098,34 +4742,6 @@ fi
 progress 10 "Starting Docker..."
 mkdir -p "${CONF_DIR}"
 
-# Everything below that actually needs root -- starting docker, reading
-# and clearing the root-only password stash under /etc/kibaos, checking
-# for the "nvidia" docker runtime, and running `docker compose up`
-# against the daemon's root-owned socket -- used to be seven separate
-# pkexec calls scattered through this function. Each one is its own
-# polkit authentication unless the local agent happens to cache
-# auth_admin sessions, which isn't something this script can rely on --
-# in practice that meant up to seven password prompts for a single "set
-# up Windows Workspace" run. Folded into one script and run through
-# exactly one pkexec instead: everything that needs root runs together,
-# once; everything that doesn't (compose.yaml templating logic aside --
-# see below -- the RDP wait-poll, setup.sh) stays out here, unprivileged,
-# same as before.
-#
-# The compose.yaml templating itself (copying from WINAPPS_SRC, the arm
-# image swap, substituting the Windows account password in) doesn't
-# strictly need root -- but the password half of it does (the stash
-# under /etc/kibaos is 0600 root:root), so rather than split templating
-# across the privilege boundary too, the whole thing moved into the
-# privileged script and gets chowned back to the real user at the end.
-#
-# pkexec resets the environment, so nothing in the privileged script can
-# rely on $HOME, $USER, or any other variable from out here -- every
-# path and identity it needs (CONF_DIR/COMPOSE_FILE, whether NVIDIA
-# hardware is even present, which real user to hand the results back to)
-# is passed in as a positional argument, already resolved out here
-# first. lspci doesn't need root, so the actual hardware check
-# (NVIDIA_HW) happens out here rather than adding a reason to elevate.
 NVIDIA_HW=0
 lspci -nnk 2>/dev/null | grep -qi 'nvidia' && NVIDIA_HW=1
 ORIG_USER="$(id -un)"
@@ -6150,66 +4766,25 @@ fi
 if [ ! -f "${COMPOSE_FILE}" ]; then
   echo "PROGRESS 15 Preparing Windows Workspace configuration..."
   cp "${WINAPPS_SRC}/compose.yaml" "${COMPOSE_FILE}"
-  # compose.yaml references "./oem" as a relative bind-mount source (for
-  # post-install RDPApps.reg / install.bat execution inside the guest).
-  # That path resolves relative to the directory `docker compose` is run
-  # from -- CONF_DIR, not WINAPPS_SRC -- so the oem/ folder has to be
-  # copied alongside compose.yaml or the bind mount has nothing to point
-  # at and `docker compose up -d` fails before the container is created.
   cp -r "${WINAPPS_SRC}/oem" "${CONF_DIR}/oem"
-  # arm gets windows-arm instead of windows -- same project, same RDP
-  # setup, just a real arm64 windows guest instead of trying to emulate
-  # x86 windows on arm hardware (which doesn't work anyway, checked!)
   if [ "$(uname -m)" = "aarch64" ]; then
     sed -i -E 's#image: dockurr/windows(:[^[:space:]]*)?$#image: dockurr/windows-arm\1#' "${COMPOSE_FILE}"
   fi
 
-  # WinApps' docker backend (dockur/windows under the hood) installs
-  # Windows completely unattended using whatever USERNAME/PASSWORD is
-  # baked into compose.yaml at container creation -- there's no
-  # interactive "create your account" step like real Windows Setup, and
-  # changing these after the fact means tearing down and recreating the
-  # VM. Left at the upstream sample values (MyWindowsUser /
-  # MyWindowsPassword), that's a weak, publicly documented password --
-  # and per WinApps' own docs, an empty/default password can make Windows
-  # auto-login in a way that breaks the RDP handshake WinApps needs.
   echo "PROGRESS 20 Setting your Windows account password..."
   WIN_USER="KibaUser"
   WIN_PASS=""
-  # Rather than a random string the person is never shown, reuse the same
-  # password they already log into KibaOS with -- one password to
-  # remember, not two. kiba_install_create_user() (disk installs) and
-  # kibaos-oem-finish.sh (OEM-imaged devices) both stash it root-only and
-  # one-time-use, right after account creation, for exactly this. Already
-  # running as root in here, so just read it directly (no separate
-  # pkexec needed the way the old per-call version needed one) and
-  # delete the stash the moment it's read, so it never sits around
-  # longer than this single read needs it to.
   STASH="/etc/kibaos/winapps-userpass"
   if [ -f "${STASH}" ]; then
     WIN_PASS="$(cat "${STASH}" 2>/dev/null)"
     rm -f "${STASH}" 2>/dev/null || true
   fi
-  # Headless: there's no dialog left to ask for a password interactively
-  # if the stash is missing or too short (e.g. this runs long after
-  # install, once the KibaOS login password has since changed) -- the
-  # old zenity --password loop simply can't happen here, and blocking a
-  # backend process on input that can never arrive would just hang it
-  # forever. Fall back to a freshly generated password instead, stashed
-  # the same root-only, 0600 way as the original -- written back out
-  # this time rather than consumed, so it can still be recovered later.
   if [ -z "${WIN_PASS}" ] || [ "${#WIN_PASS}" -lt 8 ]; then
     WIN_PASS="$(tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 20)"
     NOTE="/etc/kibaos/winapps-password-note"
     ( umask 077; printf '%s\n' "${WIN_PASS}" > "${NOTE}" ) 2>/dev/null || true
     logger -t kibaos-winapps-setup "no reusable KibaOS password found -- generated a new Windows password, stashed root-only at ${NOTE}"
   fi
-  # Rewritten line-by-line rather than with sed/awk substitution -- the
-  # password can contain characters (/, &, \) that sed and awk both treat
-  # as special in a replacement string, which would silently corrupt the
-  # line for anyone whose password has one. printf '%s' never
-  # reinterprets its argument, so this is the one substitution method
-  # that's actually safe for an arbitrary password.
   COMPOSE_TMP="$(mktemp)"
   while IFS= read -r line; do
     if [[ "${line}" =~ ^([[:space:]]*)USERNAME:[[:space:]]* ]]; then
@@ -6221,36 +4796,10 @@ if [ ! -f "${COMPOSE_FILE}" ]; then
     fi
   done < "${COMPOSE_FILE}" > "${COMPOSE_TMP}"
   mv "${COMPOSE_TMP}" "${COMPOSE_FILE}"
-  # Default to Tiny11 rather than stock Windows 11 -- this box's whole
-  # audience is "cheap/low-RAM laptop running KibaOS", and stock Win11
-  # inside dockur/windows wants noticeably more RAM/disk headroom than
-  # this hardware class tends to have to spare on top of the Linux host
-  # itself. Only rewrites VERSION if the line exists in upstream's
-  # compose.yaml as shipped -- if they ever restructure it, this just
-  # quietly no-ops instead of corrupting the file.
   sed -i "s/^\([[:space:]]*VERSION:[[:space:]]*\).*/\1\"tiny11\"/" "${COMPOSE_FILE}"
   chmod 600 "${COMPOSE_FILE}"
 fi
 
-# GPU passthrough, auto-detected -- no user prompt for this, it either
-# helps or it's a no-op. Only NVIDIA is handled: that's the only vendor
-# WinApps' docker/podman backend can pass through today (via the NVIDIA
-# Container Toolkit's CDI/legacy runtime), since it needs a driver stack
-# installed *inside* the Windows guest anyway, which only NVIDIA ships in
-# a form that works headless like this.
-#
-# Two separate checks, both required:
-#   1. NVIDIA_HW (passed in) -- is there NVIDIA hardware at all, per the
-#      unprivileged lspci check out in the caller.
-#   2. docker info -- is the "nvidia" container runtime actually
-#      registered, meaning the NVIDIA Container Toolkit is installed and
-#      the proprietary driver is loaded on the host. Already running as
-#      root in here, talking straight to the docker socket -- no pkexec
-#      needed for this one either now.
-# Hardware alone isn't enough: plenty of machines have an NVIDIA card
-# sitting there on nouveau with no proprietary driver installed, and
-# requesting a device reservation docker can't satisfy makes the whole
-# "docker compose up" fail outright rather than just skip GPU passthrough.
 echo "PROGRESS 30 Checking for GPU passthrough..."
 COMPOSE_ARGS=(--file "${COMPOSE_FILE}")
 GPU_DETECTED=0
@@ -6270,15 +4819,8 @@ GPUOVERRIDE
   COMPOSE_ARGS+=(--file "${OVERRIDE_FILE}")
   GPU_DETECTED=1
 fi
-# GPU_FLAG_FILE is how this one bit survives back out to the unprivileged
-# caller -- it's needed much later (the final "All set!" message, after
-# the RDP wait-poll and setup.sh both run unprivileged) and a variable
-# set in here doesn't exist anymore once this script exits.
 echo "${GPU_DETECTED}" > "${GPU_FLAG_FILE}"
 
-# cd happens before docker compose runs, same reasoning as always: cwd
-# is inherited across fork/exec, so this still lands docker compose in
-# CONF_DIR (needed for the compose file's relative "./oem" mount).
 echo "PROGRESS 35 Starting the Windows virtual machine..."
 COMPOSE_LOG="$(mktemp)"
 if ! ( cd "${CONF_DIR}" && docker compose "${COMPOSE_ARGS[@]}" up -d ) > "${COMPOSE_LOG}" 2>&1; then
@@ -6291,50 +4833,24 @@ if ! ( cd "${CONF_DIR}" && docker compose "${COMPOSE_ARGS[@]}" up -d ) > "${COMP
 fi
 rm -f "${COMPOSE_LOG}"
 
-# Everything under CONF_DIR was just written as root -- hand it back to
-# the real account before this script exits, or the desktop session that
-# reads compose.yaml/winapps.conf right after can't even open its own
-# config files. The root-only password note under /etc/kibaos is
-# deliberately NOT included in this -- that one's meant to stay root-only.
 chown -R "${ORIG_USER}:${ORIG_USER}" "${CONF_DIR}" 2>/dev/null || true
 PRIVILEGED
 chmod +x "${PRIV_SCRIPT}"
 
-# PROGRESS/FATAL lines the privileged script echoes above reach the
-# frontend exactly the way every other line in this file does -- pkexec
-# doesn't touch stdout/stderr, so they just flow straight through.
 pkexec bash "${PRIV_SCRIPT}" "${CONF_DIR}" "${COMPOSE_FILE}" "${NVIDIA_HW}" "${ORIG_USER}" "${GPU_FLAG_FILE}"
 PRIV_STATUS=$?
 rm -f "${PRIV_SCRIPT}"
 if [ "${PRIV_STATUS}" -eq 126 ] || [ "${PRIV_STATUS}" -eq 127 ]; then
-  # pkexec's own failure codes for "authentication wasn't completed" (the
-  # dialog was dismissed/cancelled) or "couldn't even run the command" --
-  # in both cases the privileged script never got to run, so it never
-  # got a chance to print its own FATAL: line. This is the one failure
-  # mode that still needs one from out here.
   rm -f "${GPU_FLAG_FILE}"
   fail "Windows Workspace setup needs administrator access to continue -- retry from the app menu when you're ready to authenticate."
 elif [ "${PRIV_STATUS}" -ne 0 ]; then
-  # Any other nonzero status means the privileged script itself ran and
-  # hit a real problem -- it already logged specifics and printed its
-  # own PROGRESS 100/FATAL: pair above, so there's nothing left to add;
-  # just stop.
   rm -f "${GPU_FLAG_FILE}"
   exit "${PRIV_STATUS}"
 fi
 GPU_DETECTED="$(cat "${GPU_FLAG_FILE}" 2>/dev/null || echo 0)"
 rm -f "${GPU_FLAG_FILE}"
 
-# No chromium launch here on purpose. Opening a browser window is a UI
-# concern that belongs to whatever's driving this backend, not something
-# a headless process should do on its own -- kibaos-winapps-workspace
-# already opens the noVNC console itself once winapps.conf exists below.
 
-# Source of truth for credentials from here on is compose.yaml itself,
-# not a fresh random generation -- keeps this idempotent if setup gets
-# re-run after a partial failure. The container (and whatever account is
-# actually inside it) may already exist from a prior attempt, and
-# regenerating a new password here would just desync from it.
 progress 40 "Reading Windows account details..."
 WIN_USER=$(grep -oP '^\s*USERNAME:\s*"\K[^"]+' "${COMPOSE_FILE}")
 WIN_PASS=$(grep -oP '^\s*PASSWORD:\s*"\K[^"]+' "${COMPOSE_FILE}")
@@ -6351,27 +4867,10 @@ RDP_IP="127.0.0.1"
 RDP_PORT="3389"
 WAFLAVOR="docker"
 DEBUG="true"
-# /gfx:AVC444 switches FreeRDP onto the H.264 graphics pipeline instead of
-# the legacy bitmap codec -- this is the single biggest lag fix, especially
-# for anything Photoshop/video-editing-shaped. /network:lan tells FreeRDP
-# this is a fast local link (it is: loopback to a container) rather than
-# throttling itself as if it were a WAN connection. Baked in here rather
-# than left as a README tweak, since there's no real reason for a user to
-# ever want the slower defaults on a local install.
 RDP_FLAGS="/gfx:AVC444 /network:lan"
 CONF
 chmod 600 "${CONF_DIR}/winapps.conf"
 
-# Wait for the unattended install to actually finish -- this is a real
-# Windows install (download + setup), not a quick boot, so budget up to
-# ~35 minutes rather than the couple of minutes an already-installed VM
-# would need to just bring RDP up after a restart. An open RDP port is
-# used as the "Windows is ready" signal since there's no other clean
-# hook into dockur/windows' unattended install process from out here.
-# Progress ticks every ~30s (every 6th 5s poll) rather than on every
-# single poll -- PROGRESS lines are meant to mark real movement for
-# whatever's reading them, not flood the pipe with 420 near-identical
-# updates over up to 35 minutes.
 progress 50 "Waiting for Windows to finish installing (this can take up to 35 minutes)..."
 RDP_UP=0
 for i in $(seq 1 420); do
@@ -6386,10 +4885,6 @@ if [ "${RDP_UP}" -ne 1 ]; then
   fail "Windows is taking longer than expected to finish installing -- nothing's broken, just re-run this to pick up where it left off."
 fi
 
-# Runs setup.sh synchronously -- with nowhere to render a progress dialog
-# anyway, there's no reason left to background it behind one. Full output
-# is still captured to SETUP_LOG and, on failure, forwarded to the system
-# log via logger for anyone who does need to dig in.
 progress 85 "Setting up your Windows app shortcuts..."
 SETUP_LOG="$(mktemp)"
 if ! "${WINAPPS_SRC}/setup.sh" --user --setupAllOfficiallySupportedApps > "${SETUP_LOG}" 2>&1; then
@@ -6409,12 +4904,6 @@ exit 0
 WINAPPSSETUP
 chmod +x /usr/local/bin/kibaos-winapps-setup
 
-# Menu entry so this is re-runnable any time, not just at first login
-# (e.g. if someone skips it initially, or wants to fix a broken setup).
-# Points at io.kibaos.winapps-setup (built above alongside the OOBE app)
-# rather than the raw backend script directly -- running the headless
-# script straight from a .desktop entry would mean PROGRESS/FATAL lines
-# with nowhere to go and no visible feedback at all.
 cat > /usr/share/applications/kibaos-winapps-setup.desktop << 'SETUPDESKTOP'
 [Desktop Entry]
 Type=Application
@@ -6426,12 +4915,6 @@ Terminal=false
 Categories=System;Settings;
 SETUPDESKTOP
 
-# First-login autostart: only actually shows anything if the marker from
-# kibaos-oobe-backend / kibaos-oem-finish.sh is present, which it always
-# is now (WinApps is a mandatory feature, not opt-in). Same gating style
-# as the OEM-finish entry above -- also updated to launch the GUI wrapper
-# rather than the headless backend directly, same reasoning as the menu
-# entry above.
 cat > "${SKEL}/.config/autostart/kibaos-winapps-firstrun.desktop" << 'WINAPPSAUTOCFG'
 [Desktop Entry]
 Type=Application
@@ -6442,13 +4925,6 @@ NoDisplay=true
 X-GNOME-Autostart-enabled=true
 WINAPPSAUTOCFG
 
-# ── Live-session autostart: launches the OOBE installer automatically on
-# the regular live boot (the 'liveuser' autologin session), so the person
-# lands straight in the installer instead of staring at an empty desktop.
-# gated to liveuser specifically (via `whoami`) so this never fires after
-# a real install, on the OEM-finish account (which has its own autostart
-# entry above), or on any other account this .config/autostart skeleton
-# ends up getting copied into down the line. ────────────────────────────
 cat > "${SKEL}/.config/autostart/kibaos-install-launch.desktop" << 'LIVELAUNCH'
 [Desktop Entry]
 Type=Application
@@ -6561,36 +5037,11 @@ cp -aT "${SKEL}/" /home/liveuser/
 chown -R 1000:1000 /home/liveuser
 chmod 750 /home/liveuser
 
-# ── No firewall package on KibaOS ──────────────────────────────────────────
-# ufw used to be in here, but its packaging hooks just don't behave
-# inside this chroot build container, and it goes beyond just the
-# `ufw enable` CLI call (confirmed — removing that one call wasn't even
-# enough, something in ufw's own systemd-enable-time hooks still tries a
-# /proc-dependent SSH-detection check and fails the same way, since
-# there's no real /proc in this build environment). rather than keep
-# fighting a third-party tool's chroot incompatibility for a
-# build-time-only step that was never going to filter live traffic
-# anyway, ufw's just gone entirely now. so KibaOS currently ships with no
-# firewall configured by default — worth coming back to eventually (maybe
-# straight nftables, or a different frontend) if network-facing hardening
-# ever becomes a priority, but it's not a build-blocking concern for a
-# desktop live/install image the way it'd be for a server image.
-
-# ══════════════════════════════════════════════════════════════════════════
-# WELCOME APP - Install KibaOS welcome application
 mkdir -p /usr/local/bin
 mkdir -p /usr/share/kibaos-welcome
 
-# ── Joplin (laurent22/joplin) ──────────────────────────────────────────────
-# Not in Arch's repos (AUR-only), and this path doesn't build AUR packages,
-# so grab the official AppImage from the latest GitHub release and extract it
-# (--appimage-extract needs no FUSE) into /opt/joplin. Electron's setuid
-# sandbox helper can't be set up from an extracted tree, hence --no-sandbox in
-# the launcher. Subshell + `||` so a GitHub/API hiccup can't fail the ISO build.
 (
   set -e
-  # latest tag via the /releases/latest redirect -- NOT api.github.com, whose
-  # unauthenticated rate limit 403s on shared CI runners
   JOPLIN_TAG=$(curl -fsSIL -o /dev/null -w '%{url_effective}' https://github.com/laurent22/joplin/releases/latest)
   JOPLIN_TAG="${JOPLIN_TAG##*/}"
   JOPLIN_URL="https://github.com/laurent22/joplin/releases/download/${JOPLIN_TAG}/Joplin-${JOPLIN_TAG#v}.AppImage"
@@ -6626,12 +5077,6 @@ JOPLINDESKTOP
 ) && echo "=== Joplin installed ===" \
   || echo "!! Joplin install failed -- continuing without it" >&2
 
-# ── Kando (kando-menu/kando) — cross-platform pie menu ─────────────────────
-# Same approach as Joplin: official x86_64 AppImage, extracted (no FUSE),
-# launched with --no-sandbox. Autostarts in the tray so the menu hotkey works
-# right after login. Caveat: on Wayland Kando's global-hotkey / pointer
-# integration is per-compositor (KDE, GNOME, Hyprland, Sway-style); labwc may
-# not support triggering it -- X11 sessions are the safe path.
 (
   set -e
   KANDO_TAG=$(curl -fsSIL -o /dev/null -w '%{url_effective}' https://github.com/kando-menu/kando/releases/latest)
@@ -6670,17 +5115,6 @@ KANDODESKTOP
 ) && echo "=== Kando installed ===" \
   || echo "!! Kando install failed -- continuing without it" >&2
 
-# ── VibePanel (prankstr/vibepanel) ─────────────────────────────────────────
-# GTK4 Wayland panel (quick settings, tray, system stats, OSD, notification
-# center). Official prebuilt x86_64 binary from the GitHub release, checked
-# against the published .sha256. Autostarts as a TOP bar next to the bottom
-# Budgie panel. Because it ships its own notification daemon + OSD (which
-# would fight Raven/budgie-daemon), the bundled config leaves out the
-# "notifications" widget and turns the OSD off, and it also leaves out the
-# workspaces/window_title/media widgets: VibePanel's compositor backends are
-# Hyprland/Niri/Sway/Mango only, so there's nothing for them to talk to on
-# labwc. A first-run wrapper copies the config into ~/.config/vibepanel so
-# every user (including the live session) gets it; edit that file to change it.
 (
   set -e
   VP_TAG=$(curl -fsSIL -o /dev/null -w '%{url_effective}' https://github.com/prankstr/vibepanel/releases/latest)
@@ -6690,12 +5124,10 @@ KANDODESKTOP
   rm -rf "${VP_TMP}" && mkdir -p "${VP_TMP}" && cd "${VP_TMP}"
   curl -fL --retry 3 -o vibepanel "${VP_BASE}/vibepanel-x86_64-unknown-linux-gnu"
   curl -fL --retry 3 -o vibepanel.sha256 "${VP_BASE}/vibepanel-x86_64-unknown-linux-gnu.sha256"
-  # .sha256 is "<hash>  <original filename>"; compare just the hash
   [ "$(awk '{print $1}' vibepanel.sha256)" = "$(sha256sum vibepanel | awk '{print $1}')" ]
   install -Dm755 vibepanel /usr/bin/vibepanel
   mkdir -p /usr/share/kibaos
   cat > /usr/share/kibaos/vibepanel-config.toml << 'VPCONFIG'
-# KibaOS default VibePanel config -- top bar alongside the Budgie bottom panel.
 [bar]
 position = "top"
 size = 32
@@ -6745,27 +5177,14 @@ VPAUTO
 ) && echo "=== VibePanel installed ===" \
   || echo "!! VibePanel install failed -- continuing without it" >&2
 
-# Update GTK_THEME in environment to use KibaOS
 sed -i 's/GTK_THEME=Adwaita-dark/GTK_THEME=KibaOS/' /etc/environment
 
-# ── Budgie Welcome (UbuntuBudgie/budgie-welcome) ───────────────────────────
-# No Arch package exists (Ubuntu ships it as a deb/snap), so install it from
-# source, same clone-and-copy approach as the Numix icons. Two Ubuntu-isms
-# need handling: it hard-imports `apt` (python-apt) and `notify2` at the top
-# of the script, neither of which exists on Arch -- tiny stub modules kept in
-# its own private dir (not site-packages) satisfy those imports. Its
-# "install software" pages still call apt/snap and won't do anything on
-# KibaOS; the info/tour/applet-showcase pages work fine. Not autostarted --
-# KibaOS already has its own first-run flow -- just launchable from the menu.
-# Wrapped in a subshell + `|| echo` so a GitHub hiccup can't fail the ISO build.
 (
   set -e
   BW_SRC="/tmp/budgie-welcome"
   rm -rf "${BW_SRC}"
   git clone --depth 1 https://github.com/UbuntuBudgie/budgie-welcome.git "${BW_SRC}"
   cd "${BW_SRC}"
-  # no uglifyjs on the build host: the HTML references *.min.js, so the
-  # unminified sources just get copied under the .min names
   for _js in bootstrap baguetteBox popper; do
     cp "data/js/${_js}.js" "data/js/${_js}.min.js"
   done
@@ -6778,7 +5197,6 @@ sed -i 's/GTK_THEME=Adwaita-dark/GTK_THEME=KibaOS/' /etc/environment
   install -Dm644 budgie-welcome.1 /usr/share/man/man1/budgie-welcome.1
 
   cat > /usr/share/budgie-welcome-shims/apt.py << 'APTSHIM'
-# Stub for Ubuntu's python-apt -- just enough for budgie-welcome to import.
 class Cache(dict):
     def __getitem__(self, k): raise KeyError(k)
     def __contains__(self, k): return False
@@ -6787,7 +5205,6 @@ class Cache(dict):
     def close(self, *a, **k): pass
 APTSHIM
   cat > /usr/share/budgie-welcome-shims/notify2.py << 'NOTIFYSHIM'
-# Stub for notify2 -- real notifications go through libnotify elsewhere.
 def init(*a, **k): return True
 class Notification:
     def __init__(self, *a, **k): pass
@@ -6818,8 +5235,6 @@ BWDESKTOP
 ) && echo "=== Budgie Welcome installed ===" \
   || echo "!! Budgie Welcome install failed -- continuing without it" >&2
 
-# DESKTOP SHORTCUTS
-# ══════════════════════════════════════════════════════════════════════════
 mkdir -p /usr/share/applications /etc/skel/Desktop /etc/skel/Documents \
          /etc/skel/Downloads /etc/skel/Pictures /etc/skel/Music /etc/skel/Videos
 cat > /etc/skel/.config/user-dirs.dirs << 'USERDIRS'
@@ -6831,12 +5246,6 @@ XDG_MUSIC_DIR="$HOME/Music"
 XDG_VIDEOS_DIR="$HOME/Videos"
 USERDIRS
 
-# ── "Files" launcher: opens Nemo straight into $HOME ────────────────────
-# Nemo's own .desktop entry can't be edited in place without fighting
-# future package updates, so this ships a separate launcher that's used
-# everywhere a "Files" icon is needed instead (pinned dock slot, app
-# menu) -- Exec= field codes don't expand $HOME, so it's a one-line
-# wrapper script rather than a raw Exec= path.
 cat > /usr/local/bin/kibaos-files << 'FILESWRAP'
 #!/bin/bash
 exec nemo "$HOME"
@@ -6855,22 +5264,6 @@ NoDisplay=false
 Categories=System;FileTools;FileManager;
 FILESDESK
 
-# ── Nemo/GTK sidebar bookmarks: a clean "quick access" list ────────────────
-# Windows' C:\Users\<name> feels tidy because Explorer's nav pane only
-# ever shows Desktop/Documents/Downloads/Pictures/Music/Videos plus the
-# user's own Home — everything else (our AppData-equivalent: ~/.config,
-# ~/.local, ~/.cache) is already hidden by the leading dot, same deal as
-# AppData being hidden by its own attribute on Windows. this seeds that
-# same short, fixed list into Nemo's sidebar on first login, nothing
-# more — no stray "Other Locations"/raw filesystem browsing sitting front
-# and center.
-#
-# heads up: this can't just be a static /etc/skel file — GTK bookmark
-# files are plain file:// URIs with zero variable expansion, and skel
-# gets copied byte-for-byte at account creation before the real username
-# even exists. so instead this runs once per new user via a first-login
-# script gated on a marker file, using a real $HOME at the moment it
-# actually runs.
 mkdir -p /etc/skel/.config/autostart
 cat > /usr/local/bin/kibaos-first-login-setup << 'FIRSTLOGIN'
 #!/bin/bash
@@ -6899,14 +5292,6 @@ NoDisplay=true
 X-GNOME-Autostart-Phase=Initialization
 FIRSTLOGINDESK
 
-# ══════════════════════════════════════════════════════════════════════════
-# KIBAPKG — friendly libalpm-backed package manager, invoked as `kiba`
-# ══════════════════════════════════════════════════════════════════════════
-# Talks to libalpm directly via pyalpm (no shelling out to pacman), and
-# translates its transaction/event callbacks into plain-language status
-# lines instead of pacman's raw resolver/conflict/signature jargon. Reads
-# repo names + mirror servers straight from pacman.conf/mirrorlist so it
-# stays in sync with whatever the system is actually configured to use.
 mkdir -p /usr/share/kibapkg
 cat > /usr/share/kibapkg/kibapkg.py << 'KIBAPKG'
 #!/usr/bin/env python3
@@ -7102,35 +5487,6 @@ chmod +x /usr/share/kibapkg/kibapkg.py
 ln -sf /usr/share/kibapkg/kibapkg.py /usr/local/bin/kiba
 ln -sf /usr/share/kibapkg/kibapkg.py /usr/local/bin/kibapkg
 
-# ══════════════════════════════════════════════════════════════════════════
-# PACMAN SHIM — `pacman` becomes a thin dispatcher in front of kiba
-# ══════════════════════════════════════════════════════════════════════════
-# The real pacman binary gets moved aside (NOT removed -- libalpm itself
-# isn't touched, and kibapkg already never called the pacman binary
-# anyway, it's pyalpm straight to libalpm) and /usr/bin/pacman becomes a
-# small dispatcher script instead.
-#
-# What it does NOT do: try to reimplement pacman's CLI. That's a losing
-# game -- makepkg, DKMS's pacman hooks, and any AUR helper all
-# shell out to pacman with exact flag combinations and, in some cases,
-# parse its stdout for specific fields. Silently rewriting any of that
-# output format would break real tooling for a cosmetic win, which isn't
-# a trade worth making.
-#
-# So the dispatcher only intercepts when BOTH are true:
-#   1. stdout is a real terminal (a human is sitting at it, not a script
-#      capturing output through a pipe or the DKMS/makepkg machinery)
-#   2. the arguments exactly match one of a short list of common,
-#      simple, interactively-typed invocations (pacman -S foo, -Syu,
-#      -Ss term, etc.)
-# Anything else -- any flag combo not on the list, any non-interactive
-# invocation, `-U` for local package files, `-T` dependency checks,
-# `--asdeps`, multiple mixed flags, whatever makepkg/DKMS actually use --
-# execs the real binary with the ORIGINAL argv, completely unmodified.
-# The net effect: someone typing `pacman -S firefox` out of habit gets
-# kiba's plain-language output; every script, hook, and build tool on the
-# system keeps talking to the genuine pacman/libalpm exactly as before,
-# because from their side nothing changed.
 echo "=== Installing pacman shim (real pacman -> /usr/lib/kibaos/pacman-real) ==="
 mkdir -p /usr/lib/kibaos
 if [ -f /usr/bin/pacman ] && [ ! -f /usr/lib/kibaos/pacman-real ]; then
@@ -7139,20 +5495,12 @@ fi
 
 cat > /usr/bin/pacman << 'PACMANSHIM'
 #!/usr/bin/env bash
-# pacman shim -- see the build-script comment above this heredoc for the
-# full design rationale (tty check, exact-match allowlist, fallback).
-# KIBAOS_REAL_PACMAN=1 is the documented escape hatch: set it to always
-# get the genuine binary regardless of how this is invoked.
 REAL=/usr/lib/kibaos/pacman-real
 
 if [ -n "${KIBAOS_REAL_PACMAN:-}" ] || [ ! -t 1 ]; then
   exec "${REAL}" "$@"
 fi
 
-# Bail to the real binary the instant anything looks like more than a
-# bare "flag + plain package names/terms" -- any additional flag anywhere
-# (--noconfirm, --asdeps, --needed, whatever) means this came from a
-# script, not someone typing at a prompt, so don't touch it.
 rest=("$@"); rest=("${rest[@]:1}")
 for a in "${rest[@]}"; do
   case "${a}" in -*) exec "${REAL}" "$@" ;; esac
@@ -7207,10 +5555,6 @@ Type=Application
 Categories=System;
 ABOUTDESK
 
-# ── Hide Avahi network browser (avahi-discover / avahi-ui-tools) ──────────
-# avahi drags in a "Network Browser" launcher nobody needs in the app
-# grid. override both avahi-discover and bssh/bvnc's desktop files with
-# NoDisplay so they stop showing up.
 for _avahi_desk in avahi-discover bssh bvnc; do
   if [ -f "/usr/share/applications/${_avahi_desk}.desktop" ]; then
     cp "/usr/share/applications/${_avahi_desk}.desktop" \
@@ -7220,9 +5564,6 @@ for _avahi_desk in avahi-discover bssh bvnc; do
   fi
 done
 
-# ── Hide gnome-terminal from the app launcher / shortcuts ─────────────────
-# terminal's still reachable via right-click and other paths, just don't
-# want it pinned or sitting visible in the main shortcut list.
 if [ -f "/usr/share/applications/org.gnome.Terminal.desktop" ]; then
   sed -i 's/^NoDisplay=.*/NoDisplay=true/' \
       "/usr/share/applications/org.gnome.Terminal.desktop" || true
@@ -7230,13 +5571,6 @@ if [ -f "/usr/share/applications/org.gnome.Terminal.desktop" ]; then
     || echo 'NoDisplay=true' >> "/usr/share/applications/org.gnome.Terminal.desktop"
 fi
 
-# ── Hide budgie-control-center from the app launcher ───────────────────────
-# gets pulled in transitively as a dependency of the budgie package
-# group, so can't just remove it without risking breaking budgie itself
-# — but it's superseded by the visible Settings app below, so just keep
-# it out of the menu instead. budgie-desktop-settings (the separate
-# panel/applet-layout configurator) is the same story — GNOME Settings
-# is the one and only settings entry point users should see.
 for _bcc_desk in budgie-control-center.desktop \
                  org.buddiesofbudgie.BudgieControlCenter.desktop \
                  budgie-desktop-settings.desktop \
@@ -7248,17 +5582,6 @@ for _bcc_desk in budgie-control-center.desktop \
   fi
 done
 
-# ── Hide dev/power-user tooling that has no business in a consumer app menu
-# Kvantum Manager (Qt theme engine config, pulled in as a Qt/KDE-lib dep),
-# Sysprof (system profiler), GNOME Extensions (Budgie doesn't run
-# gnome-shell extensions, this is a stray dep of some GNOME component),
-# qv4l2/qvidcap (the v4l-utils Qt test/capture utilities — camera driver
-# debugging tools, not something an end user should stumble into),
-# tuned-gui (the tuned power-profile daemon's own GUI — tuned itself stays
-# enabled as a service, just the standalone control panel is redundant now
-# that power profile switching lives in Settings), and lstopo (hwloc's
-# hardware-topology visualizer). all several candidate desktop-file names
-# are covered since exact IDs drift across distro packaging.
 for _hidden_desk in kvantummanager.desktop \
                      org.gnome.Sysprof.desktop \
                      sysprof.desktop \
@@ -7278,14 +5601,6 @@ for _hidden_desk in kvantummanager.desktop \
   fi
 done
 
-# ── Rename gnome-control-center to "Settings" ───────────────────────────────
-# plain upstream GNOME Settings here, not the Budgie fork -- current
-# libadwaita builds use the sidebar+search layout, which reads a lot
-# closer to macOS System Settings than budgie-control-center's older
-# layout does. upstream's desktop file already calls it "Settings" in
-# most locales, but strip the localised Name[xx]= lines anyway so a
-# non-English locale can't override the label — matching the other
-# rebrands in this block.
 for _gcc_desk in gnome-control-center.desktop \
                  org.gnome.Settings.desktop; do
   if [ -f "/usr/share/applications/${_gcc_desk}" ]; then
@@ -7294,15 +5609,6 @@ for _gcc_desk in gnome-control-center.desktop \
   fi
 done
 
-# gnome-control-center registers each panel as its own (usually
-# NoDisplay) .desktop file just for search indexing (e.g.
-# "gnome-wifi-panel.desktop" launches `gnome-control-center wifi`). a
-# few of those panels are GNOME-Shell-specific and don't mean anything
-# under KWin/Budgie, so hide them from search too. this list is a
-# best-effort starting point based on current upstream panel naming --
-# check `ls /usr/share/applications/gnome-*-panel.desktop` on a built
-# image and extend/trim as needed, since the exact panel-desktop-id
-# naming does shift between GNOME releases.
 for _panel_desk in gnome-multitasking-panel.desktop \
                     gnome-search-panel.desktop \
                     gnome-wwan-panel.desktop \
@@ -7314,8 +5620,6 @@ for _panel_desk in gnome-multitasking-panel.desktop \
   fi
 done
 
-# ── Rename GNOME Software so it doesn't expose the "gnome-software"/Flathub
-# plumbing in its name; consumers should just see "App Store".
 for _sw_desk in org.gnome.Software.desktop; do
   if [ -f "/usr/share/applications/${_sw_desk}" ]; then
     sed -i 's/^Name=.*/Name=App Store/' "/usr/share/applications/${_sw_desk}" || true
@@ -7323,51 +5627,26 @@ for _sw_desk in org.gnome.Software.desktop; do
   fi
 done
 
-# ── Hide the raw NetworkManager connection editor (nm-connection-editor) —
-# advanced tabs (802.1x, bonding, IPv6 routing metrics) are pure plumbing
-# for a consumer OS; Wi-Fi/wired toggling stays exposed via the panel applet.
 if [ -f "/usr/share/applications/nm-connection-editor.desktop" ]; then
   sed -i 's/^NoDisplay=.*/NoDisplay=true/' "/usr/share/applications/nm-connection-editor.desktop" || true
   grep -q '^NoDisplay=' "/usr/share/applications/nm-connection-editor.desktop" \
     || echo 'NoDisplay=true' >> "/usr/share/applications/nm-connection-editor.desktop"
 fi
 
-# ── Hide cmake-gui from the app launcher ───────────────────────────────────
-# leftover safety net: cmake used to get pulled into this chroot to
-# compile labwc-plugins-extra from source, and Arch's cmake package
-# drags a cmake-gui.desktop entry along with it -- no business showing up
-# in a consumer app menu. cmake isn't installed in the image at all
-# anymore now that that build's gone (see where labwc IPC used to be),
-# so this if-check is realistically dead code today. leaving it in
-# anyway in case cmake ever ends up pulled in here again for something
-# else later -- costs nothing to keep, and it's a lot cheaper than
-# forgetting to add it back.
 if [ -f "/usr/share/applications/cmake-gui.desktop" ]; then
   sed -i 's/^NoDisplay=.*/NoDisplay=true/' "/usr/share/applications/cmake-gui.desktop" || true
   grep -q '^NoDisplay=' "/usr/share/applications/cmake-gui.desktop" \
     || echo 'NoDisplay=true' >> "/usr/share/applications/cmake-gui.desktop"
 fi
 
-# ── Disable Magic SysRq — a raw kernel-debugging keyboard backdoor that has
-# no business being reachable from a consumer desktop.
 echo 'kernel.sysrq = 0' > /etc/sysctl.d/50-kibaos-disable-sysrq.conf
 
-# ── Restrict virtual-terminal switching: Ctrl+Alt+F2 etc. are handled by
-# the kernel's VT layer, not the compositor, so this can't be blocked
-# from KWin config no matter what. instead, remove what's waiting on
-# the other VTs — cap logind to one auto-spawned VT and mask the extra
-# getty units, so Ctrl+Alt+F2-F6 land on an empty console with no login
-# prompt to even reach.
 grep -q '^NAutoVTs' /etc/systemd/logind.conf \
   && sed -i 's/^NAutoVTs=.*/NAutoVTs=1/' /etc/systemd/logind.conf \
   || echo 'NAutoVTs=1' >> /etc/systemd/logind.conf
 systemctl mask getty@tty2.service getty@tty3.service getty@tty4.service \
                 getty@tty5.service getty@tty6.service
 
-# ── De-brand Chromium: keep the engine (site/extension/DRM compatibility),
-# strip the corporate name/icon so it doesn't read as "Google Chromium" in
-# the app grid. Icon is swapped for a flat single-color glyph consistent
-# with the rest of the KibaOS icon set.
 for _chromium_desk in chromium.desktop; do
   if [ -f "/usr/share/applications/${_chromium_desk}" ]; then
     sed -i 's/^Name=.*/Name=Browser/' "/usr/share/applications/${_chromium_desk}" || true
@@ -7383,10 +5662,6 @@ for src_desktop in kibaos-install kibaos-about; do
   chmod +x "/home/liveuser/Desktop/${src_desktop}.desktop" 2>/dev/null || true
 done
 
-
-# ══════════════════════════════════════════════════════════════════════════
-# SYSTEM ENVIRONMENT
-# ══════════════════════════════════════════════════════════════════════════
 cat > /etc/environment << 'ENV'
 DESKTOP_SESSION=Budgie
 XDG_CURRENT_DESKTOP=Budgie
@@ -7420,9 +5695,6 @@ cat > /etc/motd << 'MOTD'
 Welcome to KibaOS
 MOTD
 
-# ── Time sync ──────────────────────────────────────────────────────────────
-# Configure timesyncd with fast NTP pools so the RTC gets corrected
-# immediately on first boot rather than slewing for minutes/hours.
 mkdir -p /etc/systemd/
 cat > /etc/systemd/timesyncd.conf << 'TIMESYNCD'
 [Time]
@@ -7433,41 +5705,19 @@ PollIntervalMinSec=32
 PollIntervalMaxSec=1024
 TIMESYNCD
 
-# Force RTC to UTC (matches hwclock.conf) and enable sync
 timedatectl set-local-rtc 0 2>/dev/null || true
 systemctl enable systemd-timesyncd
-# NOT systemd-time-wait-sync: that unit exists to BLOCK boot until the
-# first NTP sync completes -- built for servers that need a guaranteed
-# clock before continuing, not a consumer desktop. timesyncd above already
-# syncs the clock in the background with zero boot-time cost; wait-sync
-# would instead add a real (sometimes multi-second, sometimes a full
-# timeout on a flaky/offline network) delay to every single boot for no
-# benefit a desktop actually needs.
 
 systemctl enable gdm
 
-# ── Network stack: NetworkManager ───────────────────────────────────────
-# Back on NetworkManager (handles Wi-Fi/wired/DNS itself, no separate
-# systemd-networkd/resolved wiring needed). Budgie's built-in network
-# indicator and nm-applet both talk to NM natively, so no custom panel
-# applet is needed either.
 systemctl enable NetworkManager
 
-# ── DNS: hardcode Cloudflare (1.1.1.1 / 1.0.0.1) ─────────────────────────
-# NetworkManager manages /etc/resolv.conf itself by default and will
-# happily overwrite it with whatever DNS servers the DHCP lease hands
-# out — flaky router/ISP resolvers are what caused the resolve errors.
-# Tell NM to keep its hands off resolv.conf, then write it ourselves so
-# DNS always points straight at Cloudflare.
 mkdir -p /etc/NetworkManager/conf.d
 cat > /etc/NetworkManager/conf.d/dns.conf << 'NMDNS'
 [main]
 dns=none
 NMDNS
 
-# ── Boot-time DNS pin ─────────────────────────────────────────────────────
-# Runs every boot, live or installed, and forces /etc/resolv.conf back to
-# a single "nameserver 1.1.1.1" line before anything else comes up.
 cat > /usr/local/bin/kibaos-boot-dns << 'BOOTDNS'
 #!/bin/bash
 echo "nameserver 1.1.1.1" > /etc/resolv.conf
@@ -7491,28 +5741,6 @@ WantedBy=sysinit.target
 BOOTDNSSVC
 systemctl enable kibaos-boot-dns.service
 
-# ── kiba-tcpmask: outbound TCP/IP fingerprint mask ───────────────────────
-# Rewrites the two heaviest-weighted fields in classic active/passive OS
-# fingerprinting (nmap -O, p0f) on every locally-generated SYN and
-# SYN-ACK before it leaves the box: IP TTL and initial TCP window size.
-# Stock Linux defaults (TTL 64, window ~64240-ish depending on MTU/scale)
-# are exactly what nmap/p0f signature databases key "Linux" off of.
-# Rewriting them to Windows 10/11's classic defaults (TTL 128, window
-# 65535) flips the top-line guess on both tools without touching
-# anything user-visible -- no GUI, no config anyone opens, nothing in
-# /etc/os-release, no libc-level uname() shim.
-#
-# Deliberately NOT touching TCP option order/presence (MSS/WScale/SACK/
-# Timestamp ordering, also fingerprinted) -- doing that means rewriting
-# option bytes in place without changing total header length, and
-# getting it wrong risks silently breaking window scaling or SACK on
-# real connections. TTL + window alone already move both tools off
-# "Linux" as the top guess; that's the safe subset to ship.
-#
-# NFQUEUE + a tiny userspace daemon rather than a kernel patch (the old
-# IP Personality approach) -- IP Personality only ever supported 2.4-era
-# kernels and never got a modern port, so a netfilter-queue callback is
-# the current equivalent that actually works against `linux` today.
 mkdir -p /usr/lib/kibaos/src
 cat > /usr/lib/kibaos/src/kiba_tcpmask.c << 'TCPMASKC'
 /* kiba-tcpmask: rewrite TTL + TCP window on outbound SYN/SYN-ACK packets
@@ -7642,11 +5870,6 @@ gcc -O2 -Wall $(pkg-config --cflags libnetfilter_queue) \
     $(pkg-config --libs libnetfilter_queue) \
   || { echo "FATAL: kiba_tcpmask.c failed to compile" >&2; exit 1; }
 
-# nftables ruleset: queue every locally-generated SYN/SYN-ACK to kiba-
-# tcpmask. 'bypass' is load-bearing -- if the daemon isn't running for
-# any reason, packets fall through and get accepted normally instead of
-# being dropped, so a crashed/masked daemon degrades to "looks like
-# Linux again" instead of "no network at all".
 mkdir -p /etc/nftables-kiba
 cat > /etc/nftables-kiba/tcpmask.conf << 'TCPMASKNFT'
 table inet kiba_tcpmask {
@@ -7680,100 +5903,27 @@ systemctl enable kiba-tcpmask.service
 chown -R 1000:1000 /home/liveuser
 chmod 750 /home/liveuser
 
-# ══════════════════════════════════════════════════════════════════════════
-# SYSTEM SERVICES — irqbalance, tuned, systemd-sysext, fstrim, tmpfiles
-# ══════════════════════════════════════════════════════════════════════════
-# irqbalance: was already in packages.x86_64 but never actually enabled --
-# distributes IRQ load across cores instead of pinning everything to CPU0,
-# which matters more on the low-core-count H616 SBC target than on a
-# desktop x86_64 box, but costs nothing either way.
-# systemd-oomd: requires PSI + full cgroups-v2 delegation to even start;
-# fails to launch in this boot environment regardless of available RAM,
-# and its startup failure was cluttering the boot log alongside real
-# early-boot failures. Masked (not just disabled) so no dependency chain
-# can pull it back in. earlyoom (already in packages.x86_64) replaces it
-# as the actual OOM responder.
 systemctl mask systemd-oomd.service systemd-oomd.socket
 systemctl enable earlyoom
 
 systemctl enable irqbalance
 
-# tuned: ships a "balanced" profile out of the box that's a reasonable
-# default for a consumer desktop (dynamic between throughput and power
-# saving) without needing power-profiles-daemon and tuned fighting over
-# the same knobs -- power-profiles-daemon is already installed for the
-# GNOME-side battery/performance toggle in Budgie's quick settings, so
-# tuned is set to a profile that doesn't try to override CPU governor
-# decisions PPD already owns. tuned-adm needs a running D-Bus session to
-# select a profile the normal way, which doesn't exist in this chroot, so
-# the active_profile file (what tuned-adm actually writes under the hood)
-# is dropped directly instead.
 mkdir -p /etc/tuned
 echo "balanced" > /etc/tuned/active_profile
 systemctl enable tuned
 
-# systemd-sysext: ships inside systemd itself, no separate package. Not
-# populated with any extension images at build time -- this just enables
-# the mechanism and creates the directories it reads from, so a .raw/
-# squashfs extension image (e.g. a driver bundle or dev toolchain for the
-# H616 SBC work) can be dropped into /var/lib/extensions and merged into
-# /usr at boot with `systemctl restart systemd-sysext`, with no rebuild
-# of the base image required. Empty directories are a no-op until
-# something's actually placed in them.
 mkdir -p /var/lib/extensions /etc/extensions
 systemctl enable systemd-sysext
 
-# fstrim.timer: ships inside systemd itself. Weekly TRIM for SSD/NVMe --
-# continuous online discard (mount option) is deliberately NOT used
-# instead, since batched weekly TRIM avoids the write-amplification and
-# latency spikes continuous discard is known for.
 systemctl enable fstrim.timer
 
-# systemd-tmpfiles-clean.timer: periodic sweep of tmpfiles.d Age= rules.
-# adding one real rule on top of the stock ones: kibaos-screenshot-ocr
-# drops its OCR scratch PNG in /tmp via mktemp
-# (now with a "kibaos-ocr." prefix specifically so this rule can target
-# just those files) and already cleans up after itself on exit, but a
-# killed/crashed OCR run would leak it -- age those out after a day as a
-# backstop. scoped to just that prefix instead of touching /tmp's own age
-# own age (already handled by systemd's stock tmpfiles.d/tmp.conf) so
-# this doesn't shadow or conflict with that default.
 cat > /etc/tmpfiles.d/kibaos.conf << 'TMPFILES'
 e /tmp/kibaos-ocr.* - - - 1d
 TMPFILES
 systemctl enable systemd-tmpfiles-clean.timer
 
-# ══════════════════════════════════════════════════════════════════════════
-# SECURITY — AppArmor, Firejail
-# ══════════════════════════════════════════════════════════════════════════
-# AppArmor: the LSM itself is only live if apparmor is in the kernel's
-# lsm= boot param (baked into /etc/kernel/cmdline and bundled into the
-# UKI for installed systems; see kiba_install_finish.c's
-# kiba_install_finalize()).
-# Enabling the service here
-# just makes it load whatever profiles ship in /etc/apparmor.d/ at boot
-# once that param is active -- profile enforcement (aa-enforce/aa-complain
-# for individual apps) is left to Remi/the end user, since KibaOS doesn't
-# curate its own profile set.
-
-
-# Firejail: firecfg symlinks /usr/local/bin/<app> -> /usr/bin/firejail for
-# every desktop app it recognizes a sandbox profile for (found by scanning
-# /usr/share/applications), so e.g. the browser launches sandboxed by
-# default without anyone having to type `firejail chromium` by hand.
-# NOTE: firejail's own namespace/seccomp sandboxing and AppArmor's
-# path-based enforcement have been reported to step on each other for
-# some apps (an app both jailed AND under a restrictive profile can get
-# denied in confusing ways) -- if something sandboxed misbehaves, check
-# `aa-status`/`journalctl` for AppArmor DENIED lines before assuming it's
-# just a firejail bug.
-
-# ── Size reduction ─────────────────────────────────────────────────────────
 rm -rf /var/cache/pacman/pkg/*
 rm -rf /usr/share/man/* /usr/share/info/* /usr/share/doc/*
-find /usr/share/locale -mindepth 1 -maxdepth 1 \
-  ! -name 'en_US' ! -name 'en_GB' ! -name 'locale.alias' \
-  -exec rm -rf {} + 2>/dev/null || true
 find /usr/lib/firmware -mindepth 1 -maxdepth 1 \
   ! -name 'i915'    ! -name 'amdgpu'   ! -name 'radeon'  \
   ! -name 'nouveau' ! -name 'iwlwifi*' ! -name 'ath*'    \
@@ -7790,9 +5940,8 @@ rm -rf /var/lib/pacman/sync/* /tmp/* /var/tmp/* 2>/dev/null || true
 
 chown -R 1000:1000 /home/liveuser
 
-# Same labwc-bridge mask as the installed-system skel path above (see
-# "labwc IS still installed") -- this is a plain file write, no D-Bus
-# involved, so it's fine as a direct chroot write.
+mkdir -p /home/liveuser/.config/labwc
+cp /etc/xdg/labwc/rc.xml /home/liveuser/.config/labwc/rc.xml
 mkdir -p /home/liveuser/.config/autostart
 cat > /home/liveuser/.config/autostart/org.buddiesofbudgie.labwc-bridge.desktop << 'NOLABWCBRIDGE'
 [Desktop Entry]
@@ -7805,30 +5954,10 @@ NOLABWCBRIDGE
 install -d -m 755 -o 1000 -g 1000 /home/liveuser/.config/dconf
 chown -R 1000:1000 /home/liveuser/.config
 
-# ══════════════════════════════════════════════════════════════════════════
-# HIDE UPSTREAM-BRANDED LAUNCHER ENTRIES
-# ══════════════════════════════════════════════════════════════════════════
-# Scoped to /usr/share/applications ONLY -- deliberately not touching
-# /usr/share/wayland-sessions or /usr/share/xsessions, since those are
-# session definitions GDM reads directly for the login screen's session
-# picker, not app-menu entries; hiding budgie-desktop.desktop there would
-# break login rather than just tidy the menu.
-#
-# Uses NoDisplay=true (the standard XDG way to hide a launcher without
-# deleting the file) rather than removing the .desktop outright -- keeps
-# the actual application and anything that might Exec= it intact, just
-# not menu-visible. Runs as one of the last steps here specifically so it
-# catches every .desktop pacstrap/AUR ended up installing by this point,
-# not just the ones known about when this block was written -- matches
-# on both filename and the Name= field, since a package can ship e.g.
-# budgie-screenshot.desktop with Name=Screenshot (filename gives it away
-# even if the display name wouldn't), or the reverse (a generically-named
-# file whose Name= field says "Budgie" something).
 for _desktop_file in /usr/share/applications/*.desktop; do
   [ -f "${_desktop_file}" ] || continue
   _basename=$(basename "${_desktop_file}")
   _name_line=$(grep -m1 '^Name=' "${_desktop_file}" 2>/dev/null || true)
-  # Budgie Welcome is added on purpose (see "Budgie Welcome" install above)
   [ "${_basename}" = "budgie-welcome.desktop" ] && continue
   if echo "${_basename}" | grep -qi 'budgie' || echo "${_name_line}" | grep -qi 'budgie'; then
     if grep -q '^NoDisplay=' "${_desktop_file}"; then
@@ -7840,44 +5969,12 @@ for _desktop_file in /usr/share/applications/*.desktop; do
   fi
 done
 
-# ── DNS: hardcode Cloudflare (1.1.1.1 / 1.0.0.1) ─────────────────────────
-# Written as the LAST thing this script does, right before mkarchiso packs
-# the airootfs into the squashfs -- NetworkManager (or anything else touched
-# above) won't get a chance to reset /etc/resolv.conf after this point, so
-# what ships in the live ISO is guaranteed to still be this file.
 cat > /etc/resolv.conf << 'RESOLVCONF'
 nameserver 1.1.1.1
 nameserver 1.0.0.1
 RESOLVCONF
 
-# ── ARM: generate the live-medium initramfs by hand ─────────────────────
-# ALARM's linux-aarch64 package (unlike x86_64's `linux`) doesn't carry
-# the 90-mkinitcpio-install.hook trigger path that would otherwise
-# regenerate the initramfs automatically on install, so nothing else in
-# this chroot ever runs mkinitcpio for us -- do it explicitly.
-#
-# No vmlinuz-* manufacturing needed here anymore: this build boots
-# aarch64 via systemd-boot (see the boot menu section and
-# install_archiso's note on why GRUB's arm64-efi target doesn't work),
-# and the fork's _make_boot_on_fat_aarch64 copies /boot/Image* onto the
-# live medium directly -- ALARM already ships that file, no renaming or
-# repackaging required. Called with an explicit -k/-g instead of -p
-# linux specifically to sidestep ALL_kver resolution: mkinitcpio's normal
-# path-based kernel-version detection wants to inspect a vmlinuz file
-# that plain ALARM installs never produce (only /boot/Image[.gz], which
-# aren't in a format mkinitcpio's version-sniffing understands), so
-# an explicit -k is required rather than hoping ALL_kver resolves
-# against a file that was never there in the first place. That -k
-# value has to come from the chroot's own /usr/lib/modules though,
-# not ambient uname -r -- see the note just below.
 if [ "$(uname -m)" = "aarch64" ]; then
-  # NOTE: uname -r here is the GH Actions RUNNER's kernel (e.g.
-  # 6.17.0-1020-azure) -- chroot only changes the filesystem root, it
-  # doesn't change what uname() reports, so ambient uname -r never
-  # matches whatever version linux-aarch64 actually dropped into this
-  # chroot's own /usr/lib/modules. Same class of bug already fixed in
-  # kibaos_oobe_backend (see kiba_install_finalize) -- read the real
-  # installed version off disk instead of trusting uname -r.
   _kver="$(ls -1 /usr/lib/modules | head -n1)"
   if [ -z "${_kver}" ]; then
     echo "ERROR: no kernel module directory found under /usr/lib/modules" >&2
@@ -7886,13 +5983,6 @@ if [ "$(uname -m)" = "aarch64" ]; then
   mkinitcpio -k "${_kver}" -c /etc/mkinitcpio.conf.d/archiso.conf -g /boot/initramfs-linux.img
 fi
 
-# ── tear down any gvfs FUSE mount left over from the dbus-run-session calls ──
-# Some gio/gsettings/dconf call earlier in this script can D-Bus-activate
-# gvfsd + gvfsd-fuse, which mounts /root/.gvfs (or $XDG_RUNTIME_DIR/gvfs)
-# inside the airootfs and never unmounts it. mkarchiso's cleanup step then
-# runs `find` over the whole airootfs, hits that dead mount, and dies with
-# "Transport endpoint is not connected" (exit 1) -- AFTER the ISO is already
-# built. Kill the daemons and lazy-unmount before handing the tree back.
 pkill -x gvfsd-fuse 2>/dev/null || true
 pkill -x gvfsd 2>/dev/null || true
 pkill -x dbus-daemon 2>/dev/null || true
@@ -7903,12 +5993,6 @@ for _gvfs in /root/.gvfs /run/user/*/gvfs /home/*/.gvfs; do
   rmdir "${_gvfs}" 2>/dev/null || true
 done
 
-# ── blank the machine-id back out for shipping ───────────────────────────
-# Re-clear the temporary real ID set near the top of this script (needed
-# only so dbus-run-session/dconf calls above had a working session bus
-# during the build) -- a live/installer image should ship with an empty
-# machine-id so systemd generates a fresh, genuinely unique one on each
-# install's first boot instead of every install sharing this build's ID.
 rm -f /etc/machine-id
 touch /etc/machine-id
 
@@ -7916,27 +6000,9 @@ echo "=== customize_airootfs.sh complete ==="
 CUSTOMIZE
 chmod +x "${AIROOTFS}/root/customize_airootfs.sh"
 
-# ══════════════════════════════════════════════════════════════════════════
-# BUILD ISO
-# ══════════════════════════════════════════════════════════════════════════
 cd "${WORKDIR}"
 rm -rf "${WORKDIR}/work"
 
-# mkarchiso's own _make_pacman_conf points pacstrap at an isolated GPGDir
-# under here (work/pacman-gnupg/), and pacstrap itself is invoked with -G
-# (never copies the host's /etc/pacman.d/gnupg in) -- mkarchiso's
-# _make_packages also never calls pacman-key on its own, so that GPGDir
-# starts out completely empty. On x86_64 this is invisible because
-# archlinux-keyring is a dependency of base and its own post-install
-# scriptlet populates the archlinux keys as part of pacstrap installing
-# it. ALARM packages are signed by a different key ("Arch Linux ARM
-# Build System <builder@archlinuxarm.org>") that the archlinux keyring
-# doesn't carry at all, and there's no archlinuxarm-keyring package on
-# this host's own x86_64 repos to pull it in the same way -- so on
-# aarch64 that GPGDir needs the ALARM key seeded by hand, before mkarchiso
-# ever touches this directory. Fingerprint per archlinuxarm.org's own
-# install docs and independently confirmed across several ALARM forum
-# threads: 68B3 537F 39A3 13B3 E574 D067 7719 3F15 2BDB E6A6.
 if [ "${KIBA_ARCH}" = "aarch64" ]; then
   mkdir -p "${WORKDIR}/work/pacman-gnupg"
   pacman-key --gpgdir "${WORKDIR}/work/pacman-gnupg" --init
