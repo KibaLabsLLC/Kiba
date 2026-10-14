@@ -2150,6 +2150,8 @@ gst-plugins-base
 gst-plugins-good
 gst-plugins-bad
 plymouth
+deepin-system-monitor
+ttf-nunito
 squashfs-tools
 
 freerdp
@@ -2171,6 +2173,7 @@ if [ "${KIBA_ARCH}" = "aarch64" ]; then
   sed -i '/^# linux-firmware split the Intel GuC\/HuC blobs/,/^# fails and KWin can never get a working renderer/d' \
     "${PROFILE}/packages.x86_64"
   sed -i '/^thermald$/d' "${PROFILE}/packages.x86_64"
+  sed -i '/^deepin-system-monitor$/d' "${PROFILE}/packages.x86_64"
   sed -i '/^syslinux$/d' "${PROFILE}/packages.x86_64"
   sed -i '/^lib32-mesa$/d; /^lib32-vulkan-icd-loader$/d' "${PROFILE}/packages.x86_64"
   sed -i '/^mkinitcpio-archiso$/d' "${PROFILE}/packages.x86_64"
@@ -2855,6 +2858,44 @@ else
   cp /usr/share/kibaos/logo-256.png "${KIBA_PLYMOUTH_DIR}/splash.png" 2>/dev/null || true
 fi
 
+# Frosted "bubble" pill that the cycling status text sits in.
+magick -size 560x88 xc:none \
+  -fill 'rgba(255,255,255,0.16)' -stroke 'rgba(255,255,255,0.40)' -strokewidth 2 \
+  -draw 'roundrectangle 2,2 557,85 43,43' \
+  -stroke none -fill 'rgba(255,255,255,0.12)' \
+  -draw 'roundrectangle 18,8 542,36 14,14' \
+  "${KIBA_PLYMOUTH_DIR}/bubble.png" \
+  || { echo "ERROR: bubble.png generation failed -- the kibaos Plymouth theme needs it" >&2; exit 1; }
+
+# Bubbly status text: each message is pre-rendered to a PNG with Nunito (a
+# rounded sans), so the font never has to exist inside the initramfs. Keep
+# this list in step with msg_count in kibaos.script (6 messages).
+BUBBLY_FONT=""
+for _f in /usr/share/fonts/ttf-nunito/NunitoHeavy-Regular.ttf \
+          /usr/share/fonts/ttf-nunito/Nunito-ExtraBold.ttf \
+          /usr/share/fonts/ttf-nunito/Nunito-Bold.ttf; do
+  [ -f "${_f}" ] && { BUBBLY_FONT="${_f}"; break; }
+done
+if [ -z "${BUBBLY_FONT}" ]; then
+  echo "ERROR: Nunito font not found (ttf-nunito) -- needed for the boot splash text" >&2
+  exit 1
+fi
+BOOT_MSGS=(
+  "KibaOS is starting…"
+  "Getting things ready…"
+  "Waking up your desktop…"
+  "Tidying up a few things…"
+  "Almost there…"
+  "Just a moment…"
+)
+for _i in "${!BOOT_MSGS[@]}"; do
+  magick -size 560x88 xc:none -font "${BUBBLY_FONT}" -pointsize 40 -gravity center \
+    -fill 'rgba(0,40,90,0.45)'      -annotate +0+3 "${BOOT_MSGS[$_i]}" \
+    -fill 'rgba(255,255,255,0.96)'  -annotate +0+0 "${BOOT_MSGS[$_i]}" \
+    "${KIBA_PLYMOUTH_DIR}/msg${_i}.png" \
+    || { echo "ERROR: boot message image ${_i} failed to render" >&2; exit 1; }
+done
+
 cat > "${KIBA_PLYMOUTH_DIR}/kibaos.plymouth" << 'PLYMOUTHDESC'
 [Plymouth Theme]
 Name=KibaOS
@@ -2868,8 +2909,9 @@ PLYMOUTHDESC
 
 cat > "${KIBA_PLYMOUTH_DIR}/kibaos.script" << 'PLYMOUTHSCRIPT'
 // KibaOS boot splash — Plymouth script theme.
-// Centered brand image on a dark background, with a small three-dot
-// progress pulse underneath and a minimal password prompt for
+// Centered brand image on a dark background, a frosted bubble underneath
+// whose friendly status text cross-fades through a list of messages, a
+// small three-dot pulse below that, and a minimal password prompt for
 // full-disk-encryption unlocks.
 
 Window.SetBackgroundTopColor(0.043, 0.055, 0.078);
@@ -2882,6 +2924,27 @@ logo.sprite.SetX(Window.GetWidth() / 2 - logo.image.GetWidth() / 2);
 logo.sprite.SetY(Window.GetHeight() / 2 - logo.image.GetHeight() / 2);
 logo.sprite.SetOpacity(1);
 
+// Frosted bubble
+bubble.image = Image("bubble.png");
+bubble.sprite = Sprite(bubble.image);
+bubble.sprite.SetX(Window.GetWidth() / 2 - bubble.image.GetWidth() / 2);
+bubble.sprite.SetY(logo.sprite.GetY() + logo.image.GetHeight() + 28);
+bubble.sprite.SetZ(10);
+bubble.sprite.SetOpacity(1);
+
+// Cycling status messages: pre-rendered PNGs (msg0.png ... msg5.png, made
+// at build time in a rounded font), each the same size as the bubble, so
+// they just sit on top of it and get faded in and out.
+msg_count = 6;
+for (i = 0; i < msg_count; i++) {
+  msg[i].image = Image("msg" + i + ".png");
+  msg[i].sprite = Sprite(msg[i].image);
+  msg[i].sprite.SetX(bubble.sprite.GetX());
+  msg[i].sprite.SetY(bubble.sprite.GetY());
+  msg[i].sprite.SetZ(11);
+  msg[i].sprite.SetOpacity(0);
+}
+
 dot_count = 3;
 dot_spacing = 26;
 dots = [];
@@ -2889,19 +2952,39 @@ for (i = 0; i < dot_count; i++) {
   dots[i].image = Image.Text("•", 1, 1, 1, 1, "Sans 28");
   dots[i].sprite = Sprite(dots[i].image);
   dots[i].sprite.SetX(Window.GetWidth() / 2 - (dot_count * dot_spacing) / 2 + i * dot_spacing);
-  dots[i].sprite.SetY(logo.sprite.GetY() + logo.image.GetHeight() + 36);
+  dots[i].sprite.SetY(bubble.sprite.GetY() + bubble.image.GetHeight() + 16);
   dots[i].sprite.SetOpacity(0.25);
 }
 
+// The refresh callback runs ~50 times a second: a message lasts ~3s and
+// fades in/out over ~0.5s each side.
 progress_tick = 0;
+msg_period = 150;
+msg_fade = 25;
 fun refresh_callback() {
   progress_tick++;
+
   active = Math.Int(progress_tick / 8) % dot_count;
   for (i = 0; i < dot_count; i++) {
     if (i == active)
       dots[i].sprite.SetOpacity(1);
     else
       dots[i].sprite.SetOpacity(0.25);
+  }
+
+  cur = Math.Int(progress_tick / msg_period) % msg_count;
+  t = progress_tick % msg_period;
+  if (t < msg_fade)
+    a = t / msg_fade;
+  else if (t > msg_period - msg_fade)
+    a = (msg_period - t) / msg_fade;
+  else
+    a = 1;
+  for (i = 0; i < msg_count; i++) {
+    if (i == cur)
+      msg[i].sprite.SetOpacity(a);
+    else
+      msg[i].sprite.SetOpacity(0);
   }
 }
 Plymouth.SetRefreshFunction(refresh_callback);
@@ -3077,27 +3160,24 @@ cat > /etc/gtk-3.0/gtk.css << 'GTK3PANEL'
 /* === KibaOS: Floating rounded-rectangle panel === */
 .budgie-panel {
     margin: 0 120px 8px 120px;
-    /* Square corners -- no rounding at all. */
-    border-radius: 0;
-    /* Frosted glass, dark: semi-transparent navy with a faint top-down
-     * light gradient and a bright hairline border for the "glass edge".
-     * GTK3 CSS has NO backdrop-filter, so the actual blur-behind can't be
-     * done from here -- it needs compositor support (KWin's Blur effect).
-     * Under labwc this renders as translucent tinted glass, not blurred. */
-    background-image: linear-gradient(to bottom,
-        rgba(255, 255, 255, 0.14), rgba(255, 255, 255, 0.04));
+    /* Rounded rectangle: squarish proportions, soft 18px corners. */
+    border-radius: 18px;
+    /* Plain semi-transparent panel: no blur, no gradient, no texture. */
+    background-image: none;
     background-color: rgba(20, 28, 44, 0.55);
-    color: #e8eef5;
+    color: #f2f6fb;
     border: 1px solid rgba(255, 255, 255, 0.20);
-    box-shadow:
-        inset 0 1px 0 rgba(255, 255, 255, 0.22),
-        0 8px 32px rgba(0, 0, 0, 0.35),
-        0 2px 8px  rgba(0, 0, 0, 0.20);
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.25);
     padding: 0 10px;
 }
 .budgie-panel .budgie-applet-button,
 .budgie-panel button.flat {
-    border-radius: 0;
+    /* Square buttons with rounded corners. */
+    min-width: 34px;
+    min-height: 34px;
+    margin: 4px 2px;
+    padding: 0;
+    border-radius: 12px;
     background: transparent;
     color: #e8eef5;
     transition: background-color 220ms cubic-bezier(0.5, 0, 0.75, 0); /* fade out */
@@ -3114,8 +3194,11 @@ cat > /etc/gtk-3.0/gtk.css << 'GTK3PANEL'
 }
 .budgie-panel .launcher:checked,
 .budgie-panel .launcher.running {
-    border-bottom: 2px solid #0099cc;
-    border-radius: 0;
+    /* Rounded tile tint instead of a flat underline (an underline would
+     * curve along the rounded corners). */
+    background-color: rgba(0, 153, 204, 0.22);
+    border: 1px solid rgba(0, 153, 204, 0.55);
+    border-radius: 12px;
     transition: border-color 200ms cubic-bezier(0.22, 1, 0.36, 1);
 }
 
@@ -6071,3 +6154,4 @@ else
   echo "ERROR: ISO file not found after mkarchiso!"
   exit 1
 fi
+(
