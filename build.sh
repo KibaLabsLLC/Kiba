@@ -2286,6 +2286,8 @@ cat > "${AIROOTFS}/root/customize_airootfs.sh" << 'CUSTOMIZE'
 #!/usr/bin/env bash
 set -e
 
+export GVFS_DISABLE_FUSE=1
+
 rm -f /etc/machine-id
 touch /etc/machine-id
 systemd-machine-id-setup
@@ -6005,11 +6007,20 @@ pkill -x gvfsd-fuse 2>/dev/null || true
 pkill -x gvfsd 2>/dev/null || true
 pkill -x dbus-daemon 2>/dev/null || true
 sleep 1
-for _gvfs in /root/.gvfs /run/user/*/gvfs /home/*/.gvfs; do
-  [ -e "${_gvfs}" ] || [ -L "${_gvfs}" ] || continue
-  fusermount3 -uz "${_gvfs}" 2>/dev/null || fusermount -uz "${_gvfs}" 2>/dev/null || umount -l "${_gvfs}" 2>/dev/null || true
-  rmdir "${_gvfs}" 2>/dev/null || true
+
+# Unmount by reading /proc/mounts: stat() on a dead FUSE mount fails with
+# ENOTCONN, so any [ -e ] guard would wrongly skip it.
+awk '$3 ~ /^fuse/ {print $2}' /proc/mounts | while read -r _m; do
+  fusermount3 -uz "${_m}" 2>/dev/null \
+    || fusermount -uz "${_m}" 2>/dev/null \
+    || umount -l "${_m}" 2>/dev/null || true
 done
+
+rm -rf /root/.gvfs /home/*/.gvfs 2>/dev/null || true
+rmdir /run/user/*/gvfs 2>/dev/null || true
+
+echo "=== remaining fuse mounts (should be none): ==="
+grep -E 'gvfs|fuse' /proc/mounts || true
 
 rm -f /etc/machine-id
 touch /etc/machine-id
