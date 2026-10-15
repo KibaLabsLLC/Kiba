@@ -2150,7 +2150,6 @@ gst-plugins-base
 gst-plugins-good
 gst-plugins-bad
 plymouth
-deepin-system-monitor
 ttf-nunito
 squashfs-tools
 
@@ -2173,7 +2172,6 @@ if [ "${KIBA_ARCH}" = "aarch64" ]; then
   sed -i '/^# linux-firmware split the Intel GuC\/HuC blobs/,/^# fails and KWin can never get a working renderer/d' \
     "${PROFILE}/packages.x86_64"
   sed -i '/^thermald$/d' "${PROFILE}/packages.x86_64"
-  sed -i '/^deepin-system-monitor$/d' "${PROFILE}/packages.x86_64"
   sed -i '/^syslinux$/d' "${PROFILE}/packages.x86_64"
   sed -i '/^lib32-mesa$/d; /^lib32-vulkan-icd-loader$/d' "${PROFILE}/packages.x86_64"
   sed -i '/^mkinitcpio-archiso$/d' "${PROFILE}/packages.x86_64"
