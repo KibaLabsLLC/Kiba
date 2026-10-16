@@ -193,12 +193,12 @@ Once installation finishes, restart your computer, remove the USB drive, and Kib
 
 ### Managing Apps with pacman
 
-KibaOS includes **KibaStore** (Bazaar) as the primary graphical app store for managing Flatpaks. For terminal users, **pacman** is configured as the primary package manager with helpful aliases.
+KibaOS includes **Okami** as the primary graphical app store for managing Flatpaks. For terminal users, **pacman** is configured as the primary package manager with helpful aliases.
 
 > [!TIP]
-> Most people won't need the terminal for package management — **KibaStore** handles installing and updating apps visually. The terminal commands are there for power users who prefer typing.
+> Most people won't need the terminal for package management — **Okami** handles installing and updating apps visually. The terminal commands are there for power users who prefer typing.
 
-### Using KibaStore (Graphical)
+### Using Okami (Graphical)
 - Browse and install Flatpak applications from Flathub
 - Automatic updates for installed applications
 - Clean, modern GTK4 interface
@@ -231,7 +231,7 @@ After that, opening **"Run Windows Workspace"** brings up the full Windows deskt
 
 ### Automatic Updates
 
-KibaOS checks for updates in the background and can apply them automatically, without interrupting your work. You can also manually update by running `update` in the terminal or using KibaStore.
+KibaOS checks for updates in the background and can apply them automatically, without interrupting your work. You can also manually update by running `update` in the terminal or using Okami.
 
 ---
 
@@ -253,7 +253,7 @@ docker run --rm --privileged \
 ```
 
 > [!NOTE]
-> The `build.sh` script orchestrates the entire build process: it sets up the Arch Linux base, configures the Budgie desktop with Dracula theme, applies KibaOS customizations, builds KibaStore, and packages everything into a bootable ISO file. The official KibaOS releases on SourceForge are built automatically using this exact same script via GitHub Actions every time changes are pushed to the project.
+> The `build.sh` script orchestrates the entire build process: it sets up the Arch Linux base, configures the Budgie desktop with Dracula theme, applies KibaOS customizations, builds Okami, and packages everything into a bootable ISO file. The official KibaOS releases on SourceForge are built automatically using this exact same script via GitHub Actions every time changes are pushed to the project.
 
 ---
 
