@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://raw.githubusercontent.com/KibaLabsLLC/Kiba/main/branding/A25ACB5D-92F7-4408-8972-CBD562BE4898.png" width="250" alt="KibaOS Banner">
+  <img src="https://github.com/KibaLabsLLC/Kiba/blob/f9dfed3c5b773fc98b754e514bb2b9d4294cb73f/assets/README/9A269086-C289-46E0-B262-47B3BF77FAB0.png" width="250" alt="KibaOS Banner">
 </p>
 
 > [!IMPORTANT]
