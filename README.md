@@ -37,6 +37,15 @@
 
 </div>
 
+# Sponsors
+
+<p align="center">
+  <a href="https://github.com/sponsors/KibaLabsLLC">
+    <img src="https://img.shields.io/badge/Sponsor-Kiba_Labs-ea4aaa?style=for-the-badge&logo=githubsponsors&logoColor=white" alt="Sponsor Kiba Labs">
+  </a>
+</p>
+
+
 ---
 
 <p align="center">
